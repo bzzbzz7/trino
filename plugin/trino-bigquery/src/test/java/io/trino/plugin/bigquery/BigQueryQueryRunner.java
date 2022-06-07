@@ -27,11 +27,11 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Maps;
 import io.airlift.log.Logger;
-import io.airlift.log.Logging;
 import io.trino.Session;
 import io.trino.plugin.tpch.TpchPlugin;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.sql.SqlExecutor;
+import org.intellij.lang.annotations.Language;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -71,6 +71,7 @@ public final class BigQueryQueryRunner
 
             connectorProperties = new HashMap<>(ImmutableMap.copyOf(connectorProperties));
             connectorProperties.putIfAbsent("bigquery.views-enabled", "true");
+            connectorProperties.putIfAbsent("bigquery.view-expire-duration", "30m");
 
             queryRunner.installPlugin(new BigQueryPlugin());
             queryRunner.createCatalog(
@@ -107,12 +108,12 @@ public final class BigQueryQueryRunner
         }
 
         @Override
-        public void execute(String sql)
+        public void execute(@Language("SQL") String sql)
         {
             executeQuery(sql);
         }
 
-        public TableResult executeQuery(String sql)
+        public TableResult executeQuery(@Language("SQL") String sql)
         {
             try {
                 return bigQuery.query(QueryJobConfiguration.of(sql));
@@ -157,6 +158,11 @@ public final class BigQueryQueryRunner
             return tableNames.build();
         }
 
+        public BigQuery getBigQuery()
+        {
+            return bigQuery;
+        }
+
         private static BigQuery createBigQueryClient()
         {
             try {
@@ -175,7 +181,6 @@ public final class BigQueryQueryRunner
     public static void main(String[] args)
             throws Exception
     {
-        Logging.initialize();
         DistributedQueryRunner queryRunner = createQueryRunner(ImmutableMap.of("http-server.http.port", "8080"), ImmutableMap.of());
         Thread.sleep(10);
         Logger log = Logger.get(BigQueryQueryRunner.class);

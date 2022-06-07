@@ -41,7 +41,7 @@ import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.CharType;
 import io.trino.spi.type.DecimalType;
-import io.trino.spi.type.Decimals;
+import io.trino.spi.type.Int128;
 import io.trino.spi.type.LongTimestamp;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.RowType;
@@ -83,6 +83,7 @@ import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapred.Reporter;
 import org.joda.time.DateTimeZone;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.math.BigInteger;
 import java.util.ArrayList;
@@ -448,7 +449,7 @@ public final class HiveWriteUtils
     public static Path getTableDefaultLocation(Database database, HdfsContext context, HdfsEnvironment hdfsEnvironment, String schemaName, String tableName)
     {
         Optional<String> location = database.getLocation();
-        if (location.isEmpty() || location.get().isEmpty()) {
+        if (location.isEmpty()) {
             throw new TrinoException(HIVE_DATABASE_LOCATION_ERROR, format("Database '%s' location is not set", schemaName));
         }
 
@@ -605,6 +606,22 @@ public final class HiveWriteUtils
         }
     }
 
+    public static void checkedDelete(FileSystem fileSystem, Path file, boolean recursive)
+            throws IOException
+    {
+        try {
+            if (!fileSystem.delete(file, recursive)) {
+                if (fileSystem.exists(file)) {
+                    // only throw exception if file still exists
+                    throw new IOException("Failed to delete " + file);
+                }
+            }
+        }
+        catch (FileNotFoundException ignored) {
+            // ok
+        }
+    }
+
     public static boolean isWritableType(HiveType hiveType)
     {
         return isWritableType(hiveType.getTypeInfo());
@@ -747,7 +764,7 @@ public final class HiveWriteUtils
             unscaledValue = BigInteger.valueOf(decimalType.getLong(block, position));
         }
         else {
-            unscaledValue = Decimals.decodeUnscaledValue(decimalType.getSlice(block, position));
+            unscaledValue = ((Int128) decimalType.getObject(block, position)).toBigInteger();
         }
         return HiveDecimal.create(unscaledValue, decimalType.getScale());
     }

@@ -41,9 +41,8 @@ import java.util.Set;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
-import static io.trino.plugin.redis.RedisHandleResolver.convertColumnHandle;
-import static io.trino.plugin.redis.RedisHandleResolver.convertTableHandle;
 import static java.util.Objects.requireNonNull;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 /**
  * Manages the Redis connector specific metadata information. The Connector provides an additional set of columns
@@ -69,7 +68,10 @@ public class RedisMetadata
 
         log.debug("Loading redis table definitions from %s", redisConnectorConfig.getTableDescriptionDir().getAbsolutePath());
 
-        this.redisTableDescriptionSupplier = Suppliers.memoize(redisTableDescriptionSupplier::get)::get;
+        this.redisTableDescriptionSupplier = Suppliers.memoizeWithExpiration(
+                redisTableDescriptionSupplier::get,
+                redisConnectorConfig.getTableDescriptionCacheDuration().toMillis(),
+                MILLISECONDS);
     }
 
     @Override
@@ -113,7 +115,7 @@ public class RedisMetadata
     @Override
     public ConnectorTableMetadata getTableMetadata(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
-        SchemaTableName schemaTableName = convertTableHandle(tableHandle).toSchemaTableName();
+        SchemaTableName schemaTableName = ((RedisTableHandle) tableHandle).toSchemaTableName();
         ConnectorTableMetadata tableMetadata = getTableMetadata(schemaTableName);
         if (tableMetadata == null) {
             throw new TableNotFoundException(schemaTableName);
@@ -137,7 +139,7 @@ public class RedisMetadata
     @Override
     public Map<String, ColumnHandle> getColumnHandles(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
-        RedisTableHandle redisTableHandle = convertTableHandle(tableHandle);
+        RedisTableHandle redisTableHandle = ((RedisTableHandle) tableHandle);
 
         RedisTableDescription redisTableDescription = getDefinedTables().get(redisTableHandle.toSchemaTableName());
         if (redisTableDescription == null) {
@@ -174,7 +176,7 @@ public class RedisMetadata
             index++;
         }
 
-        return columnHandles.build();
+        return columnHandles.buildOrThrow();
     }
 
     @Override
@@ -199,20 +201,13 @@ public class RedisMetadata
                 columns.put(tableName, tableMetadata.getColumns());
             }
         }
-        return columns.build();
+        return columns.buildOrThrow();
     }
 
     @Override
     public ColumnMetadata getColumnMetadata(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle columnHandle)
     {
-        convertTableHandle(tableHandle);
-        return convertColumnHandle(columnHandle).getColumnMetadata();
-    }
-
-    @Override
-    public boolean usesLegacyTableLayouts()
-    {
-        return false;
+        return ((RedisColumnHandle) columnHandle).getColumnMetadata();
     }
 
     @Override

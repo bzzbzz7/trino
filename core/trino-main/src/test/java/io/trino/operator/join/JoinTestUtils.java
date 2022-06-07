@@ -63,6 +63,7 @@ import static com.google.common.util.concurrent.Futures.immediateFailedFuture;
 import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
+import static io.trino.operator.HashArraySizeSupplier.incrementalLoadFactorHashArraySizeSupplier;
 import static io.trino.operator.PipelineExecutionStrategy.UNGROUPED_EXECUTION;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.sql.planner.SystemPartitioningHandle.FIXED_HASH_DISTRIBUTION;
@@ -167,7 +168,7 @@ public final class JoinTestUtils
         sinkOperatorFactory.noMoreOperators();
 
         while (!sourceDriver.isFinished()) {
-            sourceDriver.process();
+            sourceDriver.processUntilBlocked();
         }
 
         // build side operator factories
@@ -198,7 +199,8 @@ public final class JoinTestUtils
                 100,
                 new PagesIndex.TestingFactory(false),
                 spillEnabled,
-                singleStreamSpillerFactory);
+                singleStreamSpillerFactory,
+                incrementalLoadFactorHashArraySizeSupplier(taskContext.getSession()));
         return new BuildSideSetup(lookupSourceFactoryManager, buildOperatorFactory, sourceOperatorFactory, partitionCount);
     }
 
@@ -212,7 +214,7 @@ public final class JoinTestUtils
 
         while (!lookupSourceProvider.isDone()) {
             for (Driver buildDriver : buildDrivers) {
-                buildDriver.process();
+                buildDriver.processForNumberOfIterations(1);
             }
         }
         getFutureValue(lookupSourceProvider).close();
@@ -230,7 +232,7 @@ public final class JoinTestUtils
         executor.execute(() -> {
             if (!driver.isFinished()) {
                 try {
-                    driver.process();
+                    driver.processUntilBlocked();
                 }
                 catch (TrinoException e) {
                     driver.getDriverContext().failed(e);

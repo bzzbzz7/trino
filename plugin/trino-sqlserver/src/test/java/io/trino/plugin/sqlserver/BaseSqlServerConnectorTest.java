@@ -25,6 +25,8 @@ import io.trino.spi.predicate.TupleDomain;
 import io.trino.sql.planner.plan.FilterNode;
 import io.trino.testing.TestingConnectorBehavior;
 import io.trino.testing.sql.TestTable;
+import io.trino.testng.services.Flaky;
+import org.testng.SkipException;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
@@ -44,6 +46,7 @@ import static java.lang.String.format;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.IntStream.range;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertTrue;
 
@@ -68,11 +71,22 @@ public abstract class BaseSqlServerConnectorTest
             case SUPPORTS_JOIN_PUSHDOWN_WITH_DISTINCT_FROM:
                 return false;
 
+            case SUPPORTS_CREATE_TABLE_WITH_TABLE_COMMENT:
+            case SUPPORTS_CREATE_TABLE_WITH_COLUMN_COMMENT:
+                return false;
+
             case SUPPORTS_COMMENT_ON_TABLE:
             case SUPPORTS_COMMENT_ON_COLUMN:
                 return false;
 
+            case SUPPORTS_ADD_COLUMN_WITH_COMMENT:
+                return false;
+
             case SUPPORTS_ARRAY:
+            case SUPPORTS_ROW_TYPE:
+                return false;
+
+            case SUPPORTS_NEGATIVE_DATE:
                 return false;
 
             case SUPPORTS_RENAME_TABLE_ACROSS_SCHEMAS:
@@ -112,13 +126,15 @@ public abstract class BaseSqlServerConnectorTest
     protected Optional<DataMappingTestSetup> filterDataMappingSmokeTestData(DataMappingTestSetup dataMappingTestSetup)
     {
         String typeName = dataMappingTestSetup.getTrinoTypeName();
-        if (typeName.equals("timestamp(3) with time zone")) {
-            return Optional.of(dataMappingTestSetup.asUnsupported());
+        if (typeName.equals("date")) {
+            // SQL Server plus 10 days when the date is the range of 1582 Oct 5 and 14
+            if (dataMappingTestSetup.getSampleValueLiteral().equals("DATE '1582-10-05'") || dataMappingTestSetup.getSampleValueLiteral().equals("DATE '1582-10-14'")) {
+                return Optional.empty();
+            }
         }
-
-        if (typeName.equals("varbinary")) {
-            // TODO this should either work or fail cleanly
-            return Optional.empty();
+        if (typeName.equals("timestamp(3) with time zone") ||
+                typeName.equals("timestamp(6) with time zone")) {
+            return Optional.of(dataMappingTestSetup.asUnsupported());
         }
 
         return Optional.of(dataMappingTestSetup);
@@ -133,9 +149,43 @@ public abstract class BaseSqlServerConnectorTest
         onRemoteDatabase().execute("DROP VIEW IF EXISTS test_view");
     }
 
+    // TODO (https://github.com/trinodb/trino/issues/10846): Test is expected to be flaky because tests execute in parallel
+    @Flaky(issue = "https://github.com/trinodb/trino/issues/10846", match = "was deadlocked on lock resources with another process and has been chosen as the deadlock victim")
+    @Test
+    @Override
+    public void testSelectInformationSchemaColumns()
+    {
+        super.testSelectInformationSchemaColumns();
+    }
+
+    @Test
+    @Override
+    public void testReadMetadataWithRelationsConcurrentModifications()
+    {
+        try {
+            super.testReadMetadataWithRelationsConcurrentModifications();
+        }
+        catch (Exception expected) {
+            // The test failure is not guaranteed
+            // TODO (https://github.com/trinodb/trino/issues/10846): shouldn't fail
+            assertThat(expected)
+                    .hasMessageMatching("(?s).*(" +
+                            "No task completed before timeout|" +
+                            "was deadlocked on lock resources with another process and has been chosen as the deadlock victim|" +
+                            // E.g. system.metadata.table_comments can return empty results, when underlying metadata list tables call fails
+                            "Expecting actual not to be empty).*");
+            throw new SkipException("to be fixed");
+        }
+    }
+
+    @Override
+    protected void verifyConcurrentAddColumnFailurePermissible(Exception e)
+    {
+        assertThat(e).hasMessageContaining("was deadlocked on lock resources");
+    }
+
     @Test
     public void testColumnComment()
-            throws Exception
     {
         try (TestTable testTable = new TestTable(onRemoteDatabase(), "test_column_comment", "(col1 bigint, col2 bigint, col3 bigint)")) {
             onRemoteDatabase().execute("" +
@@ -154,7 +204,6 @@ public abstract class BaseSqlServerConnectorTest
 
     @Test
     public void testPredicatePushdown()
-            throws Exception
     {
         // varchar equality
         assertThat(query("SELECT regionkey, nationkey, name FROM nation WHERE name = 'ROMANIA'"))
@@ -350,6 +399,13 @@ public abstract class BaseSqlServerConnectorTest
                         ")");
     }
 
+    @Override
+    public void testDeleteWithLike()
+    {
+        assertThatThrownBy(super::testDeleteWithLike)
+                .hasStackTraceContaining("TrinoException: Unsupported delete");
+    }
+
     @Test(dataProvider = "dataCompression")
     public void testCreateWithDataCompression(DataCompression dataCompression)
     {
@@ -458,11 +514,56 @@ public abstract class BaseSqlServerConnectorTest
         assertUpdate("DROP TABLE test_show_unique_constraint_table");
     }
 
+    @Test
+    @Override
+    public void testDateYearOfEraPredicate()
+    {
+        // SQL Server throws an exception instead of an empty result when the value is out of range
+        assertQuery("SELECT orderdate FROM orders WHERE orderdate = DATE '1997-09-14'", "VALUES DATE '1997-09-14'");
+        assertQueryFails(
+                "SELECT * FROM orders WHERE orderdate = DATE '-1996-09-14'",
+                "Conversion failed when converting date and/or time from character string\\.");
+    }
+
+    @Override
+    public void testNativeQuerySimple()
+    {
+        // override because SQL Server provides an empty string as the name for unnamed column
+        assertQuery("SELECT * FROM TABLE(system.query(query => 'SELECT 1 a'))", "VALUES 1");
+    }
+
+    @Override
+    protected String errorMessageForCreateTableAsSelectNegativeDate(String date)
+    {
+        return "Failed to insert data: Conversion failed when converting date and/or time from character string.";
+    }
+
+    @Override
+    protected String errorMessageForInsertNegativeDate(String date)
+    {
+        return "Failed to insert data: Conversion failed when converting date and/or time from character string.";
+    }
+
+    @Override
+    protected String errorMessageForInsertIntoNotNullColumn(String columnName)
+    {
+        return format("Cannot insert the value NULL into column '%s'.*", columnName);
+    }
+
     private String getLongInClause(int start, int length)
     {
         String longValues = range(start, start + length)
                 .mapToObj(Integer::toString)
                 .collect(joining(", "));
         return "orderkey IN (" + longValues + ")";
+    }
+
+    @Override
+    protected Session joinPushdownEnabled(Session session)
+    {
+        return Session.builder(super.joinPushdownEnabled(session))
+                // strategy is AUTOMATIC by default and would not work for certain test cases (even if statistics are collected)
+                .setCatalogSessionProperty(session.getCatalog().orElseThrow(), "join_pushdown_strategy", "EAGER")
+                .build();
     }
 }

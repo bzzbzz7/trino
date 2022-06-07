@@ -2,6 +2,10 @@
 Oracle connector
 ================
 
+.. raw:: html
+
+  <img src="../_static/img/oracle.png" class="connector-logo">
+
 The Oracle connector allows querying and creating tables in an external Oracle
 database. Connectors let Trino join data provided by different databases,
 like Oracle and Hive, or different Oracle database instances.
@@ -25,16 +29,20 @@ properties in the file:
 .. code-block:: text
 
     connector.name=oracle
-    // The exact format of connection-url varies by Oracle version. Refer to
-    // the Oracle Database documentation for version-specific information on the
-    // JDBC Thin driver.
-    connection-url=jdbc:oracle:thin:@//example.net:1521/ORCLCDB
+    # The correct syntax of the connection-url varies by Oracle version and
+    # configuration. The following example URL connects to an Oracle SID named
+    # "orcl".
+    connection-url=jdbc:oracle:thin:@example.net:1521:orcl
     connection-user=root
     connection-password=secret
 
 The ``connection-url`` defines the connection information and parameters to pass
-to the Oracle JDBC Thin driver. See the `Oracle Database JDBC driver
-documentation <https://docs.oracle.com/cd/B28359_01/java.111/b31224/urls.htm#BEIDHCBA>`_
+to the JDBC driver. The Oracle connector uses the Oracle JDBC Thin driver,
+and the syntax of the URL may be different depending on your Oracle
+configuration. For example, the connection URL is different if you are
+connecting to an Oracle SID or an Oracle service name. See the `Oracle
+Database JDBC driver documentation
+<https://docs.oracle.com/en/database/oracle/oracle-database/21/jjdbc/data-sources-and-URLs.html#GUID-088B1600-C6C2-4F19-A020-2DAF8FE1F1C3>`_
 for more information.
 
 The ``connection-user`` and ``connection-password`` are typically required and
@@ -76,6 +84,8 @@ you name the property file ``sales.properties``, Trino creates a catalog named
 ``sales``.
 
 .. include:: jdbc-common-configurations.fragment
+
+.. include:: jdbc-procedures.fragment
 
 .. include:: jdbc-case-insensitive-matching.fragment
 
@@ -181,7 +191,7 @@ Trino data type mapping:
     - ``VARBINARY``
     -
   * - ``DATE``
-    - ``TIMESTAMP``
+    - ``TIMESTAMP(0)``
     - See :ref:`datetime mapping`
   * - ``TIMESTAMP(p)``
     - ``TIMESTAMP``
@@ -280,8 +290,8 @@ Mapping datetime types
 Selecting a timestamp with fractional second precision (``p``) greater than 3
 truncates the fractional seconds to three digits instead of rounding it.
 
-Oracle ``DATE`` type may store hours, minutes, and seconds, so it is mapped
-to Trino ``TIMESTAMP``.
+Oracle ``DATE`` type stores hours, minutes, and seconds, so it is mapped
+to Trino ``TIMESTAMP(0)``.
 
 .. warning::
 
@@ -367,27 +377,6 @@ Number to decimal configuration properties
 
     - ``UNNECESSARY``
 
-Synonyms
---------
-
-Based on performance reasons, Trino disables support for Oracle ``SYNONYM``. To
-include ``SYNONYM``, add the following configuration property:
-
-.. code-block:: text
-
-    oracle.synonyms.enabled=true
-
-.. _oracle-pushdown:
-
-Pushdown
---------
-
-The connector supports pushdown for a number of operations:
-
-* :ref:`join-pushdown`
-* :ref:`limit-pushdown`
-* :ref:`topn-pushdown`
-
 .. _oracle-sql-support:
 
 SQL support
@@ -400,6 +389,7 @@ supports the following statements:
 
 * :doc:`/sql/insert`
 * :doc:`/sql/delete`
+* :doc:`/sql/truncate`
 * :doc:`/sql/create-table`
 * :doc:`/sql/create-table-as`
 * :doc:`/sql/drop-table`
@@ -409,3 +399,100 @@ supports the following statements:
 .. include:: sql-delete-limitation.fragment
 
 .. include:: alter-table-limitation.fragment
+
+Performance
+-----------
+
+The connector includes a number of performance improvements, detailed in the
+following sections.
+
+Synonyms
+^^^^^^^^
+
+Based on performance reasons, Trino disables support for Oracle ``SYNONYM``. To
+include ``SYNONYM``, add the following configuration property:
+
+.. code-block:: text
+
+    oracle.synonyms.enabled=true
+
+.. _oracle-pushdown:
+
+Pushdown
+^^^^^^^^
+
+The connector supports pushdown for a number of operations:
+
+* :ref:`join-pushdown`
+* :ref:`limit-pushdown`
+* :ref:`topn-pushdown`
+
+In addition, the connector supports :ref:`aggregation-pushdown` for the
+following functions:
+
+* :func:`avg()`
+* :func:`count()`, also ``count(distinct x)``
+* :func:`max()`
+* :func:`min()`
+* :func:`sum()`
+
+Pushdown is only supported for ``DOUBLE`` type columns with the
+following functions:
+
+* :func:`stddev()` and :func:`stddev_samp()`
+* :func:`stddev_pop()`
+* :func:`var_pop()`
+* :func:`variance()` and :func:`var_samp()`
+
+Pushdown is only supported for ``REAL`` or ``DOUBLE`` type column
+with the following functions:
+
+* :func:`covar_samp()`
+* :func:`covar_pop()`
+
+.. include:: join-pushdown-enabled-false.fragment
+
+.. _oracle-predicate-pushdown:
+
+Predicate pushdown support
+""""""""""""""""""""""""""
+
+The connector does not support pushdown of any predicates on columns that use
+the ``CLOB``, ``NCLOB``, ``BLOB``, or ``RAW(n)`` Oracle database types, or Trino
+data types that :ref:`map <oracle-type-mapping>` to these Oracle database types.
+
+In the following example, the predicate is not pushed down for either query
+since ``name`` is a column of type ``VARCHAR``, which maps to ``NCLOB`` in
+Oracle:
+
+.. code-block:: sql
+
+    SHOW CREATE TABLE nation;
+
+    --             Create Table
+    ----------------------------------------
+    -- CREATE TABLE oracle.trino_test.nation (
+    --    name varchar
+    -- )
+    -- (1 row)
+
+    SELECT * FROM nation WHERE name > 'CANADA';
+    SELECT * FROM nation WHERE name = 'CANADA';
+
+In the following example, the predicate is pushed down for both queries
+since ``name`` is a column of type ``VARCHAR(25)``, which maps to
+``VARCHAR2(25)`` in Oracle:
+
+.. code-block:: sql
+
+    SHOW CREATE TABLE nation;
+
+    --             Create Table
+    ----------------------------------------
+    -- CREATE TABLE oracle.trino_test.nation (
+    --    name varchar(25)
+    -- )
+    -- (1 row)
+
+    SELECT * FROM nation WHERE name > 'CANADA';
+    SELECT * FROM nation WHERE name = 'CANADA';

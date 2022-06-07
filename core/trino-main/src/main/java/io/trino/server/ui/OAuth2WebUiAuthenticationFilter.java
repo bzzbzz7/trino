@@ -15,10 +15,9 @@ package io.trino.server.ui;
 
 import com.google.common.collect.ImmutableSet;
 import io.airlift.log.Logger;
-import io.jsonwebtoken.JwtException;
 import io.trino.server.security.UserMapping;
 import io.trino.server.security.UserMappingException;
-import io.trino.server.security.oauth2.ChallengeFailedException;
+import io.trino.server.security.oauth2.OAuth2Client;
 import io.trino.server.security.oauth2.OAuth2Config;
 import io.trino.server.security.oauth2.OAuth2Service;
 import io.trino.spi.security.BasicPrincipal;
@@ -28,6 +27,7 @@ import javax.inject.Inject;
 import javax.ws.rs.container.ContainerRequestContext;
 import javax.ws.rs.core.Response;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -35,6 +35,7 @@ import static com.google.common.base.MoreObjects.firstNonNull;
 import static io.trino.server.ServletSecurityUtils.sendErrorMessage;
 import static io.trino.server.ServletSecurityUtils.sendWwwAuthenticate;
 import static io.trino.server.ServletSecurityUtils.setAuthenticatedIdentity;
+import static io.trino.server.security.oauth2.OAuth2CallbackResource.CALLBACK_ENDPOINT;
 import static io.trino.server.ui.FormWebUiAuthenticationFilter.DISABLED_LOCATION;
 import static io.trino.server.ui.FormWebUiAuthenticationFilter.DISABLED_LOCATION_URI;
 import static io.trino.server.ui.FormWebUiAuthenticationFilter.TRINO_FORM_LOGIN;
@@ -49,15 +50,19 @@ public class OAuth2WebUiAuthenticationFilter
 
     private final String principalField;
     private final OAuth2Service service;
+    private final OAuth2Client client;
     private final UserMapping userMapping;
+    private final Optional<String> groupsField;
 
     @Inject
-    public OAuth2WebUiAuthenticationFilter(OAuth2Service service, OAuth2Config oauth2Config)
+    public OAuth2WebUiAuthenticationFilter(OAuth2Service service, OAuth2Client client, OAuth2Config oauth2Config)
     {
         this.service = requireNonNull(service, "service is null");
+        this.client = requireNonNull(client, "client is null");
         requireNonNull(oauth2Config, "oauth2Config is null");
         this.userMapping = UserMapping.createUserMapping(oauth2Config.getUserMappingPattern(), oauth2Config.getUserMappingFile());
         this.principalField = oauth2Config.getPrincipalField();
+        groupsField = requireNonNull(oauth2Config.getGroupsField(), "groupsField is null");
     }
 
     @Override
@@ -80,16 +85,9 @@ public class OAuth2WebUiAuthenticationFilter
             return;
         }
         Optional<Map<String, Object>> claims;
-        try {
-            claims = getAccessToken(request);
-            if (claims.isEmpty()) {
-                needAuthentication(request);
-                return;
-            }
-        }
-        catch (ChallengeFailedException e) {
-            LOG.debug(e, "Invalid token: %s", e.getMessage());
-            sendErrorMessage(request, UNAUTHORIZED, "Unauthorized");
+        claims = getAccessToken(request);
+        if (claims.isEmpty()) {
+            needAuthentication(request);
             return;
         }
 
@@ -101,9 +99,11 @@ public class OAuth2WebUiAuthenticationFilter
                 return;
             }
             String principalName = (String) principal;
-            setAuthenticatedIdentity(request, Identity.forUser(userMapping.mapUser(principalName))
-                    .withPrincipal(new BasicPrincipal(principalName))
-                    .build());
+            Identity.Builder builder = Identity.forUser(userMapping.mapUser(principalName));
+            builder.withPrincipal(new BasicPrincipal(principalName));
+            groupsField.flatMap(field -> Optional.ofNullable((List<String>) claims.get().get(field)))
+                    .ifPresent(groups -> builder.withGroups(ImmutableSet.copyOf(groups)));
+            setAuthenticatedIdentity(request, builder.build());
         }
         catch (UserMappingException e) {
             sendErrorMessage(request, UNAUTHORIZED, firstNonNull(e.getMessage(), "Unauthorized"));
@@ -111,16 +111,10 @@ public class OAuth2WebUiAuthenticationFilter
     }
 
     private Optional<Map<String, Object>> getAccessToken(ContainerRequestContext request)
-            throws ChallengeFailedException
     {
         Optional<String> accessToken = OAuthWebUiCookie.read(request.getCookies().get(OAUTH2_COOKIE));
         if (accessToken.isPresent()) {
-            try {
-                return service.convertTokenToClaims(accessToken.get());
-            }
-            catch (JwtException | IllegalArgumentException e) {
-                LOG.debug(e, "Unable to parse JWT token");
-            }
+            return client.getClaims(accessToken.get());
         }
         return Optional.empty();
     }
@@ -132,7 +126,9 @@ public class OAuth2WebUiAuthenticationFilter
             sendWwwAuthenticate(request, "Unauthorized", ImmutableSet.of(TRINO_FORM_LOGIN));
             return;
         }
-        request.abortWith(service.startOAuth2Challenge(request.getUriInfo()));
+        request.abortWith(service.startOAuth2Challenge(
+                request.getUriInfo().getBaseUri().resolve(CALLBACK_ENDPOINT),
+                Optional.empty()));
     }
 
     private static boolean isValidPrincipal(Object principal)

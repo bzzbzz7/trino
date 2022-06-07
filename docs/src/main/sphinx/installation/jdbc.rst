@@ -10,8 +10,11 @@ as those used for reporting and database development, use the JDBC driver.
 Requirements
 ------------
 
-The JDBC driver is compatible with Java versions 8 or higher, and can be used with
-applications running on Java virtual machines version 8 or higher.
+The Trino JDBC driver has the following requirements:
+
+* Java version 8 or higher.
+* All users that connect to Trino with the JDBC driver must be granted access to
+  query tables in the ``system.jdbc`` schema.
 
 Installing
 ----------
@@ -85,6 +88,8 @@ This example JDBC URL locates a Trino instance running on port ``8080`` on
   client. If it is not, use ``io.trino.jdbc.TrinoDriver`` wherever a driver
   classname is required.
 
+.. _jdbc-java-connection:
+
 Connection parameters
 ---------------------
 
@@ -94,7 +99,7 @@ examples are equivalent:
 
 .. code-block:: java
 
-    // URL parameters
+    // properties
     String url = "jdbc:trino://example.net:8080/hive/sales";
     Properties properties = new Properties();
     properties.setProperty("user", "test");
@@ -102,8 +107,8 @@ examples are equivalent:
     properties.setProperty("SSL", "true");
     Connection connection = DriverManager.getConnection(url, properties);
 
-    // properties
-    String url = "jdbc:trino://example.net:8080/hive/sales?user=test&password=secret&SSL=true";
+    // URL parameters
+    String url = "jdbc:trino://example.net:8443/hive/sales?user=test&password=secret&SSL=true";
     Connection connection = DriverManager.getConnection(url);
 
 These methods may be mixed; some parameters may be specified in the URL,
@@ -135,7 +140,7 @@ Name                                                         Description
                                                              property nor ``ApplicationName`` or ``source`` are set, the source
                                                              name for the query is ``trino-jdbc``.
 ``accessToken``                                              :doc:`JWT </security/jwt>` access token for token based authentication.
-``SSL``                                                      Set ``true`` to specify using HTTPS/TLS for connections.
+``SSL``                                                      Set ``true`` to specify using TLS/HTTPS for connections.
 ``SSLVerification``                                          The method of TLS verification. There are three modes: ``FULL``
                                                              (default), ``CA`` and ``NONE``. For ``FULL``, the normal TLS
                                                              verification is performed. For ``CA``, only the CA is verified but
@@ -153,6 +158,11 @@ Name                                                         Description
 ``SSLTrustStorePassword``                                    The password for the TrustStore.
 ``SSLTrustStoreType``                                        The type of the TrustStore. The default type is provided by the Java
                                                              ``keystore.type`` security property or ``jks`` if none exists.
+``SSLUseSystemTrustStore``                                   Set ``true`` to automatically use the system TrustStore based on the operating system.
+                                                             The supported OSes are Windows and macOS. For Windows, the ``Windows-ROOT``
+                                                             TrustStore is selected. For macOS, the ``KeychainStore`` TrustStore is selected.
+                                                             For other OSes, the default Java TrustStore is loaded.
+                                                             The TrustStore specification can be overridden using ``SSLTrustStoreType``.
 ``KerberosRemoteServiceName``                                Trino coordinator Kerberos service name. This parameter is
                                                              required for Kerberos authentication.
 ``KerberosPrincipal``                                        The principal to use when authenticating to the Trino coordinator.
@@ -167,6 +177,9 @@ Name                                                         Description
 ``KerberosConfigPath``                                       Kerberos configuration file.
 ``KerberosKeytabPath``                                       Kerberos keytab file.
 ``KerberosCredentialCachePath``                              Kerberos credential cache.
+``KerberosDelegation``                                       Set to ``true`` to use the token from an existing Kerberos context.
+                                                             This allows client to use Kerberos authentication without passing
+                                                             the Keytab or credential cache. Defaults to ``false``.
 ``extraCredentials``                                         Extra credentials for connecting to external services,
                                                              specified as a list of key-value pairs. For example,
                                                              ``foo:bar;abc:xyz`` creates the credential named ``abc``
@@ -180,14 +193,16 @@ Name                                                         Description
                                                              For example, ``abc:xyz;example.foo:bar`` sets the system property
                                                              ``abc`` to the value ``xyz`` and the ``foo`` property for
                                                              catalog ``example`` to the value ``bar``.
-``externalAuthentication``                                   Use a local web browser to authenticate with an identity provider (IdP)
-                                                             that has been configured for the Trino coordinator.
-                                                             See :doc:`/security/oauth2` for more details.
+``externalAuthentication``                                   Set to true if you want to use external authentication via
+                                                             :doc:`/security/oauth2`. Use a local web browser to authenticate with an
+                                                             identity provider (IdP) that has been configured for the Trino coordinator.
 ``externalAuthenticationTokenCache``                         Allows the sharing of external authentication tokens between different
                                                              connections for the same authenticated user until the cache is
                                                              invalidated, such as when a client is restarted or when the classloader
                                                              reloads the JDBC driver. This is disabled by default, with a value of
-                                                             ``NONE``. To enable, set the value to ``MEMORY``.
+                                                             ``NONE``. To enable, set the value to ``MEMORY``. If the JDBC driver is used
+                                                             in a shared mode by different users, the first registered token is stored
+                                                             and authenticates all users.
 ``disableCompression``                                       Whether compression should be enabled.
 ``assumeLiteralNamesInMetadataCallsForNonConformingClients`` When enabled, the name patterns passed to ``DatabaseMetaData`` methods
                                                              are treated as literals. You can use this as a workaround for

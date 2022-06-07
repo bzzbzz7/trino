@@ -119,7 +119,7 @@ public class TestTrinoDatabaseMetaData
                 .put("hive.metastore", "file")
                 .put("hive.metastore.catalog.dir", server.getBaseDataDir().resolve("hive").toAbsolutePath().toString())
                 .put("hive.security", "sql-standard")
-                .build());
+                .buildOrThrow());
 
         countingMockConnector = new CountingMockConnector();
         server.installPlugin(countingMockConnector.getPlugin());
@@ -259,6 +259,16 @@ public class TestTrinoDatabaseMetaData
             assertEquals(metaData.getDatabaseProductVersion(), "testversion");
             assertEquals(metaData.getDatabaseMajorVersion(), 0);
             assertEquals(metaData.getDatabaseMinorVersion(), 0);
+        }
+    }
+
+    @Test
+    public void testGetUserName()
+            throws Exception
+    {
+        try (Connection connection = createConnection()) {
+            DatabaseMetaData metaData = connection.getMetaData();
+            assertEquals(metaData.getUserName(), "admin");
         }
     }
 
@@ -658,6 +668,7 @@ public class TestTrinoDatabaseMetaData
                 assertEquals(rs.getString("TABLE_SCHEM"), "information_schema");
                 assertEquals(rs.getString("TABLE_NAME"), "tables");
                 assertEquals(rs.getString("COLUMN_NAME"), "table_name");
+                assertEquals(rs.getString("IS_NULLABLE"), "YES");
                 assertEquals(rs.getInt("DATA_TYPE"), Types.VARCHAR);
                 assertTrue(rs.next());
                 assertEquals(rs.getString("TABLE_CAT"), "hive");
@@ -721,6 +732,14 @@ public class TestTrinoDatabaseMetaData
                 assertTrue(rs.next());
                 assertEquals(rs.getString("COLUMN_NAME"), "table_name");
                 assertFalse(rs.next());
+            }
+        }
+
+        try (Connection connection = createConnection()) {
+            try (ResultSet rs = connection.getMetaData().getColumns(TEST_CATALOG, "tiny", "supplier", "suppkey")) {
+                assertColumnMetadata(rs);
+                assertTrue(rs.next());
+                assertEquals(rs.getString("IS_NULLABLE"), "NO");
             }
         }
 
@@ -1496,6 +1515,33 @@ public class TestTrinoDatabaseMetaData
         assertEquals(TrinoDatabaseMetaData.escapeIfNecessary(true, "abc\\_def"), "abc\\\\\\_def");
     }
 
+    @Test
+    public void testStatementsDoNotLeak()
+            throws Exception
+    {
+        TrinoConnection connection = (TrinoConnection) this.connection;
+        DatabaseMetaData metaData = connection.getMetaData();
+
+        // consumed
+        try (ResultSet resultSet = metaData.getCatalogs()) {
+            assertThat(countRows(resultSet)).isEqualTo(5);
+        }
+        try (ResultSet resultSet = metaData.getSchemas(TEST_CATALOG, null)) {
+            assertThat(countRows(resultSet)).isEqualTo(10);
+        }
+        try (ResultSet resultSet = metaData.getTables(TEST_CATALOG, "sf%", null, null)) {
+            assertThat(countRows(resultSet)).isEqualTo(64);
+        }
+
+        // not consumed
+        metaData.getCatalogs().close();
+        metaData.getSchemas(TEST_CATALOG, null).close();
+        metaData.getTables(TEST_CATALOG, "sf%", null, null).close();
+
+        assertThat(connection.activeStatements()).as("activeStatements")
+                .isEqualTo(0);
+    }
+
     private static void assertColumnSpec(ResultSet rs, int dataType, Long precision, Long numPrecRadix, String typeName)
             throws SQLException
     {
@@ -1583,6 +1629,16 @@ public class TestTrinoDatabaseMetaData
                 return readRows(resultSet, columns);
             }
         };
+    }
+
+    private int countRows(ResultSet resultSet)
+            throws Exception
+    {
+        int rows = 0;
+        while (resultSet.next()) {
+            rows++;
+        }
+        return rows;
     }
 
     private Connection createConnection()

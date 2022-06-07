@@ -13,11 +13,6 @@ steps:
 #. the user's browser is redirected back to the Trino coordinator with an authorization code
 #. the Trino coordinator exchanges the authorization code for a token
 
-.. note::
-
-    OAuth 2.0 authentication currently supports JWT access tokens only, and
-    therefore does not support opaque access tokens.
-
 To enable OAuth 2.0 authentication for Trino, configuration changes are made on
 the Trino coordinator. No changes are required to the worker configuration;
 only the communication from the clients to the coordinator is authenticated.
@@ -25,6 +20,9 @@ only the communication from the clients to the coordinator is authenticated.
 Set the callback/redirect URL to ``https://<trino-coordinator-domain-name>/oauth2/callback``,
 when configuring an OAuth 2.0 authorization server like an OpenID-connect
 provider.
+
+Using :doc:`TLS <tls>` and :doc:`a configured shared secret
+</security/internal-communication>` is required for OAuth 2.0 authentication.
 
 Trino server configuration
 --------------------------
@@ -113,6 +111,8 @@ The following configuration properties are available:
        for more information.
    * - ``http-server.authentication.oauth2.principal-field``
      - The field of the access token used for the Trino user principal. Defaults to ``sub``. Other commonly used fields include ``sAMAccountName``, ``name``, ``upn``, and ``email``.
+   * - ``http-server.authentication.oauth2.groups-field``
+     - The field of the access token used for Trino groups. The corresponding claim value must be an array.
 
 
 Troubleshooting

@@ -40,8 +40,8 @@ public class TestRenameMaterializedViewTask
         metadata.createMaterializedView(testSession, materializedViewName, someMaterializedView(), false, false);
 
         getFutureValue(executeRenameMaterializedView(asQualifiedName(materializedViewName), asQualifiedName(newMaterializedViewName)));
-        assertThat(metadata.getMaterializedView(testSession, materializedViewName)).isEmpty();
-        assertThat(metadata.getMaterializedView(testSession, newMaterializedViewName)).isPresent();
+        assertThat(metadata.isMaterializedView(testSession, materializedViewName)).isFalse();
+        assertThat(metadata.isMaterializedView(testSession, newMaterializedViewName)).isTrue();
     }
 
     @Test
@@ -71,7 +71,7 @@ public class TestRenameMaterializedViewTask
 
         assertTrinoExceptionThrownBy(() -> getFutureValue(executeRenameMaterializedView(asQualifiedName(tableName), qualifiedName("existing_table_new"))))
                 .hasErrorCode(TABLE_NOT_FOUND)
-                .hasMessage("Materialized View '%s' does not exist, but a table with that name exists. Did you mean ALTER TABLE %s RENAME ...?", tableName, tableName);
+                .hasMessage("Materialized View '%s' does not exist, but a table with that name exists. Did you mean ALTER TABLE %s RENAME TO ...?", tableName, tableName);
     }
 
     @Test
@@ -82,7 +82,7 @@ public class TestRenameMaterializedViewTask
 
         assertTrinoExceptionThrownBy(() -> getFutureValue(executeRenameMaterializedView(asQualifiedName(tableName), qualifiedName("existing_table_new"), true)))
                 .hasErrorCode(TABLE_NOT_FOUND)
-                .hasMessage("Materialized View '%s' does not exist, but a table with that name exists. Did you mean ALTER TABLE %s RENAME ...?", tableName, tableName);
+                .hasMessage("Materialized View '%s' does not exist, but a table with that name exists. Did you mean ALTER TABLE %s RENAME TO ...?", tableName, tableName);
     }
 
     @Test
@@ -106,7 +106,7 @@ public class TestRenameMaterializedViewTask
 
         assertTrinoExceptionThrownBy(() -> getFutureValue(executeRenameMaterializedView(viewName, qualifiedName("existing_view_new"))))
                 .hasErrorCode(TABLE_NOT_FOUND)
-                .hasMessage("Materialized View '%s' does not exist, but a view with that name exists. Did you mean ALTER VIEW catalog.schema.existing_view RENAME ...?", viewName);
+                .hasMessage("Materialized View '%s' does not exist, but a view with that name exists. Did you mean ALTER VIEW catalog.schema.existing_view RENAME TO ...?", viewName);
     }
 
     @Test
@@ -117,7 +117,7 @@ public class TestRenameMaterializedViewTask
 
         assertTrinoExceptionThrownBy(() -> getFutureValue(executeRenameMaterializedView(viewName, qualifiedName("existing_view_new"), true)))
                 .hasErrorCode(TABLE_NOT_FOUND)
-                .hasMessage("Materialized View '%s' does not exist, but a view with that name exists. Did you mean ALTER VIEW catalog.schema.existing_view RENAME ...?", viewName);
+                .hasMessage("Materialized View '%s' does not exist, but a view with that name exists. Did you mean ALTER VIEW catalog.schema.existing_view RENAME TO ...?", viewName);
     }
 
     @Test
@@ -140,6 +140,7 @@ public class TestRenameMaterializedViewTask
 
     private ListenableFuture<Void> executeRenameMaterializedView(QualifiedName source, QualifiedName target, boolean exists)
     {
-        return new RenameMaterializedViewTask().execute(new RenameMaterializedView(source, target, exists), transactionManager, metadata, new AllowAllAccessControl(), queryStateMachine, ImmutableList.of(), WarningCollector.NOOP);
+        return new RenameMaterializedViewTask(metadata, new AllowAllAccessControl())
+                .execute(new RenameMaterializedView(source, target, exists), queryStateMachine, ImmutableList.of(), WarningCollector.NOOP);
     }
 }

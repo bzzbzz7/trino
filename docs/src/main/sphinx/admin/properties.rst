@@ -2,14 +2,21 @@
 Properties reference
 ====================
 
-This section describes the most important config properties, that
-may be used to tune Trino or alter its behavior when required.
+This section describes the most important config properties and (where
+applicable) their corresponding :ref:`session properties
+<session-properties-definition>`, that may be used to tune Trino or alter its
+behavior when required.
+
+The following pages are not a complete list of all configuration and
+session properties available in Trino, and do not include any connector-specific
+catalog configuration properties. For more information on catalog configuration
+properties, refer to the :doc:`connector documentation </connector/>`.
 
 .. toctree::
     :titlesonly:
 
     General <properties-general>
-    Memory management <properties-memory-management>
+    Resource management <properties-resource-management>
     Query management <properties-query-management>
     Spilling <properties-spilling>
     Exchange <properties-exchange>
@@ -86,6 +93,10 @@ The ``duration`` type supports the following units:
 
 A duration of ``0`` is treated as zero regardless of the unit that follows.
 For example, ``0s`` and ``0m`` both mean the same thing.
+
+Properties of type ``duration`` also support decimal values, such as ``2.25d``.
+These are handled as a fractional value of the specified unit. For example, the
+value ``1.5m`` equals one and a half minutes, or 90 seconds.
 
 .. _prop-type-integer:
 

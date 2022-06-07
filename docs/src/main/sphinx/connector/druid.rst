@@ -2,6 +2,10 @@
 Druid connector
 ===============
 
+.. raw:: html
+
+  <img src="../_static/img/druid.png" class="connector-logo">
+
 The Druid connector allows querying an `Apache Druid <https://druid.apache.org/>`_
 database from Trino.
 
@@ -43,6 +47,8 @@ Now you can access your Druid database in Trino with the ``druiddb`` catalog
 name from the properties file.
 
 .. include:: jdbc-common-configurations.fragment
+
+.. include:: jdbc-procedures.fragment
 
 .. include:: jdbc-case-insensitive-matching.fragment
 

@@ -17,10 +17,7 @@ import com.google.common.util.concurrent.ListenableFuture;
 import io.airlift.slice.Slice;
 import io.trino.Session;
 import io.trino.connector.CatalogName;
-import io.trino.operator.aggregation.InternalAggregationFunction;
-import io.trino.operator.window.WindowFunctionSupplier;
 import io.trino.spi.TrinoException;
-import io.trino.spi.block.BlockEncodingSerde;
 import io.trino.spi.connector.AggregateFunction;
 import io.trino.spi.connector.AggregationApplicationResult;
 import io.trino.spi.connector.BeginTableExecuteResult;
@@ -29,10 +26,8 @@ import io.trino.spi.connector.CatalogSchemaTableName;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorCapabilities;
-import io.trino.spi.connector.ConnectorMaterializedViewDefinition;
 import io.trino.spi.connector.ConnectorOutputMetadata;
 import io.trino.spi.connector.ConnectorTableMetadata;
-import io.trino.spi.connector.ConnectorViewDefinition;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.connector.JoinApplicationResult;
@@ -47,10 +42,10 @@ import io.trino.spi.connector.SampleType;
 import io.trino.spi.connector.SortItem;
 import io.trino.spi.connector.SystemTable;
 import io.trino.spi.connector.TableColumnsMetadata;
+import io.trino.spi.connector.TableFunctionApplicationResult;
 import io.trino.spi.connector.TableScanRedirectApplicationResult;
 import io.trino.spi.connector.TopNApplicationResult;
 import io.trino.spi.expression.ConnectorExpression;
-import io.trino.spi.function.InvocationConvention;
 import io.trino.spi.function.OperatorType;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.security.GrantInfo;
@@ -61,11 +56,7 @@ import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.statistics.ComputedStatistics;
 import io.trino.spi.statistics.TableStatistics;
 import io.trino.spi.statistics.TableStatisticsMetadata;
-import io.trino.spi.type.ParametricType;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.TypeId;
-import io.trino.spi.type.TypeSignature;
-import io.trino.spi.type.TypeSignatureParameter;
 import io.trino.sql.analyzer.TypeSignatureProvider;
 import io.trino.sql.planner.PartitioningHandle;
 import io.trino.sql.tree.QualifiedName;
@@ -104,14 +95,13 @@ public interface Metadata
             String procedureName,
             Map<String, Object> executeProperties);
 
-    Optional<NewTableLayout> getLayoutForTableExecute(Session session, TableExecuteHandle tableExecuteHandle);
+    Optional<TableLayout> getLayoutForTableExecute(Session session, TableExecuteHandle tableExecuteHandle);
 
     BeginTableExecuteResult<TableExecuteHandle, TableHandle> beginTableExecute(Session session, TableExecuteHandle handle, TableHandle updatedSourceTableHandle);
 
     void finishTableExecute(Session session, TableExecuteHandle handle, Collection<Slice> fragments, List<Object> tableExecuteState);
 
-    @Deprecated
-    Optional<TableLayoutResult> getLayout(Session session, TableHandle tableHandle, Constraint constraint, Optional<Set<ColumnHandle>> desiredColumns);
+    void executeTableExecute(Session session, TableExecuteHandle handle);
 
     TableProperties getTableProperties(Session session, TableHandle handle);
 
@@ -150,12 +140,13 @@ public interface Metadata
     TableMetadata getTableMetadata(Session session, TableHandle tableHandle);
 
     /**
-     * Return statistics for specified table for given filtering contraint.
+     * Return statistics for specified table.
      */
-    TableStatistics getTableStatistics(Session session, TableHandle tableHandle, Constraint constraint);
+    TableStatistics getTableStatistics(Session session, TableHandle tableHandle);
 
     /**
-     * Get the names that match the specified table prefix (never null).
+     * Get the relation names that match the specified table prefix (never null).
+     * This includes all relations (e.g. tables, views, materialized views).
      */
     List<QualifiedObjectName> listTables(Session session, QualifiedTablePrefix prefix);
 
@@ -177,7 +168,7 @@ public interface Metadata
      * Gets the columns metadata for all tables that match the specified prefix.
      * TODO: consider returning a stream for more efficient processing
      */
-    Map<CatalogName, List<TableColumnsMetadata>> listTableColumns(Session session, QualifiedTablePrefix prefix);
+    List<TableColumnsMetadata> listTableColumns(Session session, QualifiedTablePrefix prefix);
 
     /**
      * Creates a schema.
@@ -216,7 +207,7 @@ public interface Metadata
     /**
      * Set properties to the specified table.
      */
-    void setTableProperties(Session session, TableHandle tableHandle, Map<String, Object> properties);
+    void setTableProperties(Session session, TableHandle tableHandle, Map<String, Optional<Object>> properties);
 
     /**
      * Comments to the specified table.
@@ -255,19 +246,24 @@ public interface Metadata
      */
     void dropTable(Session session, TableHandle tableHandle);
 
-    Optional<NewTableLayout> getNewTableLayout(Session session, String catalogName, ConnectorTableMetadata tableMetadata);
+    /**
+     * Truncates the specified table
+     */
+    void truncateTable(Session session, TableHandle tableHandle);
+
+    Optional<TableLayout> getNewTableLayout(Session session, String catalogName, ConnectorTableMetadata tableMetadata);
 
     /**
      * Begin the atomic creation of a table with data.
      */
-    OutputTableHandle beginCreateTable(Session session, String catalogName, ConnectorTableMetadata tableMetadata, Optional<NewTableLayout> layout);
+    OutputTableHandle beginCreateTable(Session session, String catalogName, ConnectorTableMetadata tableMetadata, Optional<TableLayout> layout);
 
     /**
      * Finish a table creation with data after the data is written.
      */
     Optional<ConnectorOutputMetadata> finishCreateTable(Session session, OutputTableHandle tableHandle, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics);
 
-    Optional<NewTableLayout> getInsertLayout(Session session, TableHandle target);
+    Optional<TableLayout> getInsertLayout(Session session, TableHandle target);
 
     /**
      * Describes statistics that must be collected during a write.
@@ -347,11 +343,6 @@ public interface Metadata
     ColumnHandle getUpdateRowIdColumnHandle(Session session, TableHandle tableHandle, List<ColumnHandle> updatedColumns);
 
     /**
-     * @return whether delete without table scan is supported
-     */
-    boolean supportsMetadataDelete(Session session, TableHandle tableHandle);
-
-    /**
      * Push delete into connector
      */
     Optional<TableHandle> applyDelete(Session session, TableHandle tableHandle);
@@ -401,12 +392,20 @@ public interface Metadata
     /**
      * Get the view definitions that match the specified table prefix (never null).
      */
-    Map<QualifiedObjectName, ConnectorViewDefinition> getViews(Session session, QualifiedTablePrefix prefix);
+    Map<QualifiedObjectName, ViewInfo> getViews(Session session, QualifiedTablePrefix prefix);
+
+    /**
+     * Is the specified table a view.
+     */
+    default boolean isView(Session session, QualifiedObjectName viewName)
+    {
+        return getView(session, viewName).isPresent();
+    }
 
     /**
      * Returns the view definition for the specified view name.
      */
-    Optional<ConnectorViewDefinition> getView(Session session, QualifiedObjectName viewName);
+    Optional<ViewDefinition> getView(Session session, QualifiedObjectName viewName);
 
     /**
      * Gets the schema properties for the specified schema.
@@ -421,7 +420,7 @@ public interface Metadata
     /**
      * Creates the specified view with the specified view definition.
      */
-    void createView(Session session, QualifiedObjectName viewName, ConnectorViewDefinition definition, boolean replace);
+    void createView(Session session, QualifiedObjectName viewName, ViewDefinition definition, boolean replace);
 
     /**
      * Rename the specified view.
@@ -442,9 +441,6 @@ public interface Metadata
      * Try to locate a table index that can lookup results by indexableColumns and provide the requested outputColumns.
      */
     Optional<ResolvedIndex> resolveIndex(Session session, TableHandle tableHandle, Set<ColumnHandle> indexableColumns, Set<ColumnHandle> outputColumns, TupleDomain<ColumnHandle> tupleDomain);
-
-    @Deprecated
-    boolean usesLegacyTableLayouts(Session session, TableHandle table);
 
     Optional<LimitApplicationResult<TableHandle>> applyLimit(Session session, TableHandle table, long limit);
 
@@ -477,6 +473,8 @@ public interface Metadata
             long topNCount,
             List<SortItem> sortItems,
             Map<String, ColumnHandle> assignments);
+
+    Optional<TableFunctionApplicationResult<TableHandle>> applyTableFunction(Session session, TableFunctionHandle handle);
 
     default void validateScan(Session session, TableHandle table) {}
 
@@ -574,6 +572,11 @@ public interface Metadata
     void grantSchemaPrivileges(Session session, CatalogSchemaName schemaName, Set<Privilege> privileges, TrinoPrincipal grantee, boolean grantOption);
 
     /**
+     * Deny the specified privilege to the specified principal on the specified schema.
+     */
+    void denySchemaPrivileges(Session session, CatalogSchemaName schemaName, Set<Privilege> privileges, TrinoPrincipal grantee);
+
+    /**
      * Revokes the specified privilege on the specified schema from the specified user.
      */
     void revokeSchemaPrivileges(Session session, CatalogSchemaName schemaName, Set<Privilege> privileges, TrinoPrincipal grantee, boolean grantOption);
@@ -582,6 +585,11 @@ public interface Metadata
      * Grants the specified privilege to the specified user on the specified table
      */
     void grantTablePrivileges(Session session, QualifiedObjectName tableName, Set<Privilege> privileges, TrinoPrincipal grantee, boolean grantOption);
+
+    /**
+     * Deny the specified privilege to the specified principal on the specified table
+     */
+    void denyTablePrivileges(Session session, QualifiedObjectName tableName, Set<Privilege> privileges, TrinoPrincipal grantee);
 
     /**
      * Revokes the specified privilege on the specified table from the specified user
@@ -594,33 +602,10 @@ public interface Metadata
     List<GrantInfo> listTablePrivileges(Session session, QualifiedTablePrefix prefix);
 
     //
-    // Types
-    //
-
-    Type getType(TypeSignature signature);
-
-    Type fromSqlType(String sqlType);
-
-    Type getType(TypeId id);
-
-    default Type getParameterizedType(String baseTypeName, List<TypeSignatureParameter> typeParameters)
-    {
-        return getType(new TypeSignature(baseTypeName, typeParameters));
-    }
-
-    Collection<Type> getTypes();
-
-    Collection<ParametricType> getParametricTypes();
-
-    void verifyTypes();
-
-    //
     // Functions
     //
 
-    void addFunctions(List<? extends SqlFunction> functions);
-
-    List<FunctionMetadata> listFunctions();
+    Collection<FunctionMetadata> listFunctions(Session session);
 
     ResolvedFunction decodeFunction(QualifiedName name);
 
@@ -642,50 +627,16 @@ public interface Metadata
      * Is the named function an aggregation function?  This does not need type parameters
      * because overloads between aggregation and other function types are not allowed.
      */
-    boolean isAggregationFunction(QualifiedName name);
+    boolean isAggregationFunction(Session session, QualifiedName name);
 
-    FunctionMetadata getFunctionMetadata(ResolvedFunction resolvedFunction);
+    FunctionMetadata getFunctionMetadata(Session session, ResolvedFunction resolvedFunction);
 
-    AggregationFunctionMetadata getAggregationFunctionMetadata(ResolvedFunction resolvedFunction);
-
-    WindowFunctionSupplier getWindowFunctionImplementation(ResolvedFunction resolvedFunction);
-
-    InternalAggregationFunction getAggregateFunctionImplementation(ResolvedFunction resolvedFunction);
-
-    FunctionInvoker getScalarFunctionInvoker(ResolvedFunction resolvedFunction, InvocationConvention invocationConvention);
-
-    ProcedureRegistry getProcedureRegistry();
-
-    TableProceduresRegistry getTableProcedureRegistry();
-
-    //
-    // Blocks
-    //
-
-    BlockEncodingSerde getBlockEncodingSerde();
-
-    //
-    // Properties
-    //
-
-    SessionPropertyManager getSessionPropertyManager();
-
-    SchemaPropertyManager getSchemaPropertyManager();
-
-    TablePropertyManager getTablePropertyManager();
-
-    MaterializedViewPropertyManager getMaterializedViewPropertyManager();
-
-    ColumnPropertyManager getColumnPropertyManager();
-
-    AnalyzePropertyManager getAnalyzePropertyManager();
-
-    TableProceduresPropertyManager getTableProceduresPropertyManager();
+    AggregationFunctionMetadata getAggregationFunctionMetadata(Session session, ResolvedFunction resolvedFunction);
 
     /**
      * Creates the specified materialized view with the specified view definition.
      */
-    void createMaterializedView(Session session, QualifiedObjectName viewName, ConnectorMaterializedViewDefinition definition, boolean replace, boolean ignoreExisting);
+    void createMaterializedView(Session session, QualifiedObjectName viewName, MaterializedViewDefinition definition, boolean replace, boolean ignoreExisting);
 
     /**
      * Drops the specified materialized view.
@@ -700,12 +651,20 @@ public interface Metadata
     /**
      * Get the materialized view definitions that match the specified table prefix (never null).
      */
-    Map<QualifiedObjectName, ConnectorMaterializedViewDefinition> getMaterializedViews(Session session, QualifiedTablePrefix prefix);
+    Map<QualifiedObjectName, ViewInfo> getMaterializedViews(Session session, QualifiedTablePrefix prefix);
+
+    /**
+     * Is the specified table a materialized view.
+     */
+    default boolean isMaterializedView(Session session, QualifiedObjectName viewName)
+    {
+        return getMaterializedView(session, viewName).isPresent();
+    }
 
     /**
      * Returns the materialized view definition for the specified view name.
      */
-    Optional<ConnectorMaterializedViewDefinition> getMaterializedView(Session session, QualifiedObjectName viewName);
+    Optional<MaterializedViewDefinition> getMaterializedView(Session session, QualifiedObjectName viewName);
 
     /**
      * Method to get difference between the states of table at two different points in time/or as of given token-ids.
@@ -719,6 +678,11 @@ public interface Metadata
     void renameMaterializedView(Session session, QualifiedObjectName existingViewName, QualifiedObjectName newViewName);
 
     /**
+     * Sets the properties of the specified materialized view.
+     */
+    void setMaterializedViewProperties(Session session, QualifiedObjectName viewName, Map<String, Optional<Object>> properties);
+
+    /**
      * Returns the result of redirecting the table scan on a given table to a different table.
      * This method is used by the engine during the plan optimization phase to allow a connector to offload table scans to any other connector.
      * This method is called after security checks against the original table.
@@ -729,4 +693,29 @@ public interface Metadata
      * Get the target table handle after performing redirection.
      */
     RedirectionAwareTableHandle getRedirectionAwareTableHandle(Session session, QualifiedObjectName tableName);
+
+    /**
+     * Get the target table handle after performing redirection with a table version.
+     */
+    RedirectionAwareTableHandle getRedirectionAwareTableHandle(Session session, QualifiedObjectName tableName, Optional<TableVersion> startVersion, Optional<TableVersion> endVersion);
+
+    /**
+     * Verifies that a version is valid for a given table
+     */
+    boolean isValidTableVersion(Session session, QualifiedObjectName tableName, TableVersion version);
+
+    /**
+     * Returns true if the connector reports number of written bytes for an existing table. Otherwise, it returns false.
+     */
+    boolean supportsReportingWrittenBytes(Session session, TableHandle tableHandle);
+
+    /**
+     * Returns true if the connector reports number of written bytes for a new table. Otherwise, it returns false.
+     */
+    boolean supportsReportingWrittenBytes(Session session, QualifiedObjectName tableName, Map<String, Object> tableProperties);
+
+    /**
+     * Returns a table handle for the specified table name with a specified version
+     */
+    Optional<TableHandle> getTableHandle(Session session, QualifiedObjectName tableName, Optional<TableVersion> startVersion, Optional<TableVersion> endVersion);
 }

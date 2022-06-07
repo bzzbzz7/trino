@@ -14,22 +14,12 @@
 package io.trino.server.security.oauth2;
 
 import com.google.inject.Binder;
-import com.google.inject.Key;
-import com.google.inject.Provides;
 import com.google.inject.Scopes;
 import io.airlift.configuration.AbstractConfigurationAwareModule;
-import io.airlift.http.client.HttpClient;
-import io.jsonwebtoken.SigningKeyResolver;
-import io.trino.server.security.jwt.ForJwk;
-import io.trino.server.security.jwt.JwkService;
-import io.trino.server.security.jwt.JwkSigningKeyResolver;
 import io.trino.server.ui.OAuth2WebUiInstalled;
 
-import javax.inject.Singleton;
-
-import java.net.URI;
-
 import static com.google.inject.multibindings.OptionalBinder.newOptionalBinder;
+import static io.airlift.configuration.ConditionalModule.conditionalModule;
 import static io.airlift.configuration.ConfigBinder.configBinder;
 import static io.airlift.http.client.HttpClientBinder.httpClientBinder;
 import static io.airlift.jaxrs.JaxrsBinder.jaxrsBinder;
@@ -46,10 +36,12 @@ public class OAuth2ServiceModule
         configBinder(binder).bindConfig(OAuth2Config.class);
         binder.bind(OAuth2Service.class).in(Scopes.SINGLETON);
         binder.bind(OAuth2TokenHandler.class).to(OAuth2TokenExchange.class).in(Scopes.SINGLETON);
+        binder.bind(NimbusHttpClient.class).to(NimbusAirliftHttpClient.class).in(Scopes.SINGLETON);
         newOptionalBinder(binder, OAuth2Client.class)
                 .setDefault()
-                .to(ScribeJavaOAuth2Client.class)
+                .to(NimbusOAuth2Client.class)
                 .in(Scopes.SINGLETON);
+        install(conditionalModule(OAuth2Config.class, OAuth2Config::isEnableDiscovery, this::bindOidcDiscovery, this::bindStaticConfiguration));
         httpClientBinder(binder)
                 .bindHttpClient("oauth2-jwk", ForOAuth2.class)
                 // Reset to defaults to override InternalCommunicationModule changes to this client default configuration.
@@ -62,18 +54,18 @@ public class OAuth2ServiceModule
                         .setTrustStorePath(null)
                         .setTrustStorePassword(null)
                         .setAutomaticHttpsSharedSecret(null));
-        // Used by JwkService
-        binder.bind(HttpClient.class).annotatedWith(ForJwk.class).to(Key.get(HttpClient.class, ForOAuth2.class));
-        binder.bind(JwkService.class).in(Scopes.SINGLETON);
-        binder.bind(SigningKeyResolver.class).annotatedWith(ForOAuth2.class).to(JwkSigningKeyResolver.class).in(Scopes.SINGLETON);
     }
 
-    @Provides
-    @Singleton
-    @ForJwk
-    public static URI createJwkAddress(OAuth2Config config)
+    private void bindStaticConfiguration(Binder binder)
     {
-        return URI.create(config.getJwksUrl());
+        configBinder(binder).bindConfig(StaticOAuth2ServerConfiguration.class);
+        binder.bind(OAuth2ServerConfigProvider.class).to(StaticConfigurationProvider.class).in(Scopes.SINGLETON);
+    }
+
+    private void bindOidcDiscovery(Binder binder)
+    {
+        configBinder(binder).bindConfig(OidcDiscoveryConfig.class);
+        binder.bind(OAuth2ServerConfigProvider.class).to(OidcDiscovery.class).in(Scopes.SINGLETON);
     }
 
     @Override

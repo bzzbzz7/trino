@@ -93,7 +93,7 @@ public class TrinoConnection
 
     private final URI jdbcUri;
     private final URI httpUri;
-    private final String user;
+    private final Optional<String> user;
     private final Optional<String> sessionUser;
     private final boolean compressionDisabled;
     private final boolean assumeLiteralNamesInMetadataCallsForNonConformingClients;
@@ -680,11 +680,6 @@ public class TrinoConnection
         return jdbcUri;
     }
 
-    String getUser()
-    {
-        return user;
-    }
-
     @VisibleForTesting
     Map<String, String> getExtraCredentials()
     {
@@ -772,6 +767,11 @@ public class TrinoConnection
         }
     }
 
+    void removePreparedStatement(String name)
+    {
+        preparedStatements.remove(name);
+    }
+
     private void registerStatement(TrinoStatement statement)
     {
         checkState(statements.add(statement), "Statement is already registered");
@@ -780,6 +780,12 @@ public class TrinoConnection
     private void unregisterStatement(TrinoStatement statement)
     {
         checkState(statements.remove(statement), "Statement is not registered");
+    }
+
+    @VisibleForTesting
+    int activeStatements()
+    {
+        return statements.size();
     }
 
     private void checkOpen()

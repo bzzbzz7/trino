@@ -92,6 +92,28 @@ Property Name                                Description
                                              without staging file to be created in the local file system.
 
 ``hive.s3.streaming.part-size``              The part size for S3 streaming upload. Defaults to ``16MB``.
+
+``hive.s3.proxy.host``                       Proxy host to use if connecting through a proxy
+
+``hive.s3.proxy.port``                       Proxy port to use if connecting through a proxy
+
+``hive.s3.proxy.protocol``                   Proxy protocol. HTTP or HTTPS , defaults to ``HTTPS``.
+
+``hive.s3.proxy.non-proxy-hosts``            Hosts list to access without going through the proxy.
+
+``hive.s3.proxy.username``                   Proxy user name to use if connecting through a proxy
+
+``hive.s3.proxy.password``                   Proxy password name to use if connecting through a proxy
+
+``hive.s3.proxy.preemptive-basic-auth``      Whether to attempt to authenticate preemptively against proxy
+                                             when using base authorization, defaults to ``false``.
+
+``hive.s3.sts.endpoint``                     Optional override for the sts endpoint given that IAM role based
+                                             authentication via sts is used.
+
+``hive.s3.sts.region``                       Optional override for the sts region given that IAM role based
+                                             authentication via sts is used.
+
 ============================================ =================================================================
 
 .. _hive-s3-credentials:
@@ -112,10 +134,13 @@ rotate credentials on a regular basis without any additional work on your part.
 Custom S3 credentials provider
 ------------------------------
 
-You can configure a custom S3 credentials provider by setting the Hadoop
-configuration property ``presto.s3.credentials-provider`` to be the
-fully qualified class name of a custom AWS credentials provider
-implementation. This class must implement the
+You can configure a custom S3 credentials provider by setting the configuration
+property ``trino.s3.credentials-provider`` to the fully qualified class name of
+a custom AWS credentials provider implementation. The property must be set in
+the Hadoop configuration files referenced by the ``hive.config.resources`` Hive
+connector property.
+
+The class must implement the
 `AWSCredentialsProvider <http://docs.aws.amazon.com/AWSJavaSDK/latest/javadoc/com/amazonaws/auth/AWSCredentialsProvider.html>`_
 interface and provide a two-argument constructor that takes a
 ``java.net.URI`` and a Hadoop ``org.apache.hadoop.conf.Configuration``
@@ -123,8 +148,7 @@ as arguments. A custom credentials provider can be used to provide
 temporary credentials from STS (using ``STSSessionCredentialsProvider``),
 IAM role-based credentials (using ``STSAssumeRoleSessionCredentialsProvider``),
 or credentials for a specific use case (e.g., bucket/user specific credentials).
-This Hadoop configuration property must be set in the Hadoop configuration
-files referenced by the ``hive.config.resources`` Hive connector property.
+
 
 .. _hive-s3-security-mapping:
 
@@ -157,6 +181,12 @@ The security mapping must provide one or more configuration settings:
   extra credential. This overrides any globally configured IAM role. This role
   is allowed to be specified as an extra credential, although specifying it
   explicitly has no effect, as it would be used anyway.
+
+* ``roleSessionName``: Optional role session name to use with ``iamRole``. This can only
+  be used when ``iamRole`` is specified. If ``roleSessionName`` includes the string
+  ``${USER}``, then the ``${USER}`` portion of the string will be replaced with the
+  current session's username. If ``roleSessionName`` is not specified, it defaults
+  to ``trino-session``.
 
 * ``allowedIamRoles``: IAM roles that are allowed to be specified as an extra
   credential. This is useful because a particular AWS account may have permissions

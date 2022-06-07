@@ -85,7 +85,12 @@ public abstract class PrimitiveColumnReader
 
     protected abstract void readValue(BlockBuilder blockBuilder, Type type);
 
-    protected abstract void skipValue();
+    private void skipSingleValue()
+    {
+        if (definitionLevel == columnDescriptor.getMaxDefinitionLevel()) {
+            valuesReader.skip();
+        }
+    }
 
     protected boolean isValueNull()
     {
@@ -207,8 +212,10 @@ public abstract class PrimitiveColumnReader
 
     public ColumnChunk readPrimitive(Field field)
     {
-        IntList definitionLevels = new IntArrayList();
-        IntList repetitionLevels = new IntArrayList();
+        // Pre-allocate these arrays to the necessary size. This saves a substantial amount of
+        // CPU time by avoiding container resizing.
+        IntList definitionLevels = new IntArrayList(nextBatchSize);
+        IntList repetitionLevels = new IntArrayList(nextBatchSize);
         seek();
         BlockBuilder blockBuilder = field.getType().createBlockBuilder(null, nextBatchSize);
         int valueCount = 0;
@@ -233,7 +240,12 @@ public abstract class PrimitiveColumnReader
     private void readValues(BlockBuilder blockBuilder, int valuesToRead, Type type, IntList definitionLevels, IntList repetitionLevels)
     {
         processValues(valuesToRead, () -> {
-            readValue(blockBuilder, type);
+            if (definitionLevel == columnDescriptor.getMaxDefinitionLevel()) {
+                readValue(blockBuilder, type);
+            }
+            else if (isValueNull()) {
+                blockBuilder.appendNull();
+            }
             definitionLevels.add(definitionLevel);
             repetitionLevels.add(repetitionLevel);
         });
@@ -241,7 +253,7 @@ public abstract class PrimitiveColumnReader
 
     private void skipValues(long valuesToRead)
     {
-        processValues(valuesToRead, this::skipValue);
+        processValues(valuesToRead, this::skipSingleValue);
     }
 
     /**
@@ -290,7 +302,7 @@ public abstract class PrimitiveColumnReader
                     consumed = true;
                 }
                 else {
-                    skipValue();
+                    skipSingleValue();
                     skipCount++;
                     consumed = false;
                 }

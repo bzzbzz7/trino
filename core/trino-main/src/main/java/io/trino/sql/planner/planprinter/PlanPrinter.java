@@ -29,6 +29,7 @@ import io.trino.execution.QueryStats;
 import io.trino.execution.StageInfo;
 import io.trino.execution.StageStats;
 import io.trino.execution.TableInfo;
+import io.trino.metadata.FunctionManager;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.TableHandle;
 import io.trino.operator.StageExecutionDescriptor;
@@ -85,6 +86,7 @@ import io.trino.sql.planner.plan.RemoteSourceNode;
 import io.trino.sql.planner.plan.RowNumberNode;
 import io.trino.sql.planner.plan.SampleNode;
 import io.trino.sql.planner.plan.SemiJoinNode;
+import io.trino.sql.planner.plan.SimpleTableExecuteNode;
 import io.trino.sql.planner.plan.SortNode;
 import io.trino.sql.planner.plan.SpatialJoinNode;
 import io.trino.sql.planner.plan.StatisticAggregations;
@@ -103,9 +105,11 @@ import io.trino.sql.planner.plan.UpdateNode;
 import io.trino.sql.planner.plan.ValuesNode;
 import io.trino.sql.planner.plan.WindowNode;
 import io.trino.sql.planner.planprinter.NodeRepresentation.TypedSymbol;
+import io.trino.sql.planner.rowpattern.AggregationValuePointer;
 import io.trino.sql.planner.rowpattern.LogicalIndexExtractor.ExpressionAndValuePointers;
-import io.trino.sql.planner.rowpattern.LogicalIndexExtractor.ValuePointer;
 import io.trino.sql.planner.rowpattern.LogicalIndexPointer;
+import io.trino.sql.planner.rowpattern.ScalarValuePointer;
+import io.trino.sql.planner.rowpattern.ValuePointer;
 import io.trino.sql.planner.rowpattern.ir.IrLabel;
 import io.trino.sql.tree.ComparisonExpression;
 import io.trino.sql.tree.Expression;
@@ -117,7 +121,6 @@ import io.trino.sql.tree.QualifiedName;
 import io.trino.sql.tree.Row;
 import io.trino.sql.tree.SkipTo.Position;
 import io.trino.sql.tree.SymbolReference;
-import io.trino.util.GraphvizPrinter;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -199,7 +202,11 @@ public class PlanPrinter
                 .mapToLong(planNode -> planNode.getPlanNodeCpuTime().toMillis())
                 .sum(), MILLISECONDS));
 
-        this.representation = new PlanRepresentation(planRoot, types, totalCpuTime, totalScheduledTime);
+        Optional<Duration> totalBlockedTime = stats.map(s -> new Duration(s.values().stream()
+                .mapToLong(planNode -> planNode.getPlanNodeBlockedTime().toMillis())
+                .sum(), MILLISECONDS));
+
+        this.representation = new PlanRepresentation(planRoot, types, totalCpuTime, totalScheduledTime, totalBlockedTime);
 
         Visitor visitor = new Visitor(stageExecutionStrategy, types, estimatedStatsAndCosts, stats);
         planRoot.accept(visitor, null);
@@ -215,14 +222,14 @@ public class PlanPrinter
         return new JsonRenderer().render(representation);
     }
 
-    public static String jsonFragmentPlan(PlanNode root, Map<Symbol, Type> symbols, Metadata metadata, Session session)
+    public static String jsonFragmentPlan(PlanNode root, Map<Symbol, Type> symbols, Metadata metadata, FunctionManager functionManager, Session session)
     {
         TypeProvider typeProvider = TypeProvider.copyOf(symbols.entrySet().stream()
                 .distinct()
                 .collect(toImmutableMap(Map.Entry::getKey, Map.Entry::getValue)));
 
         TableInfoSupplier tableInfoSupplier = new TableInfoSupplier(metadata, session);
-        ValuePrinter valuePrinter = new ValuePrinter(metadata, session);
+        ValuePrinter valuePrinter = new ValuePrinter(metadata, functionManager, session);
         return new PlanPrinter(root, typeProvider, Optional.empty(), tableInfoSupplier, ImmutableMap.of(), valuePrinter, StatsAndCosts.empty(), Optional.empty()).toJson();
     }
 
@@ -230,13 +237,14 @@ public class PlanPrinter
             PlanNode plan,
             TypeProvider types,
             Metadata metadata,
+            FunctionManager functionManager,
             StatsAndCosts estimatedStatsAndCosts,
             Session session,
             int level,
             boolean verbose)
     {
         TableInfoSupplier tableInfoSupplier = new TableInfoSupplier(metadata, session);
-        ValuePrinter valuePrinter = new ValuePrinter(metadata, session);
+        ValuePrinter valuePrinter = new ValuePrinter(metadata, functionManager, session);
         return new PlanPrinter(plan, types, Optional.empty(), tableInfoSupplier, ImmutableMap.of(), valuePrinter, estimatedStatsAndCosts, Optional.empty()).toText(verbose, level);
     }
 
@@ -244,13 +252,14 @@ public class PlanPrinter
             StageInfo outputStageInfo,
             QueryStats queryStats,
             Metadata metadata,
+            FunctionManager functionManager,
             Session session,
             boolean verbose)
     {
         return textDistributedPlan(
                 outputStageInfo,
                 queryStats,
-                new ValuePrinter(metadata, session),
+                new ValuePrinter(metadata, functionManager, session),
                 verbose);
     }
 
@@ -260,14 +269,14 @@ public class PlanPrinter
             ValuePrinter valuePrinter,
             boolean verbose)
     {
-        Map<PlanNodeId, TableInfo> tableInfos = getAllStages(Optional.of(outputStageInfo)).stream()
+        List<StageInfo> allStages = getAllStages(Optional.of(outputStageInfo));
+        Map<PlanNodeId, TableInfo> tableInfos = allStages.stream()
                 .map(StageInfo::getTables)
                 .map(Map::entrySet)
                 .flatMap(Collection::stream)
                 .collect(toImmutableMap(Entry::getKey, Entry::getValue));
 
         StringBuilder builder = new StringBuilder();
-        List<StageInfo> allStages = getAllStages(Optional.of(outputStageInfo));
         List<PlanFragment> allFragments = allStages.stream()
                 .map(StageInfo::getPlan)
                 .collect(toImmutableList());
@@ -293,10 +302,10 @@ public class PlanPrinter
         return builder.toString();
     }
 
-    public static String textDistributedPlan(SubPlan plan, Metadata metadata, Session session, boolean verbose)
+    public static String textDistributedPlan(SubPlan plan, Metadata metadata, FunctionManager functionManager, Session session, boolean verbose)
     {
         TableInfoSupplier tableInfoSupplier = new TableInfoSupplier(metadata, session);
-        ValuePrinter valuePrinter = new ValuePrinter(metadata, session);
+        ValuePrinter valuePrinter = new ValuePrinter(metadata, functionManager, session);
         StringBuilder builder = new StringBuilder();
         TypeProvider typeProvider = getTypeProvider(plan.getAllFragments());
         for (PlanFragment fragment : plan.getAllFragments()) {
@@ -329,9 +338,12 @@ public class PlanPrinter
             double sdAmongTasks = Math.sqrt(squaredDifferences / stageInfo.get().getTasks().size());
 
             builder.append(indentString(1))
-                    .append(format("CPU: %s, Scheduled: %s, Input: %s (%s); per task: avg.: %s std.dev.: %s, Output: %s (%s)\n",
+                    .append(format("CPU: %s, Scheduled: %s, Blocked %s (Input: %s, Output: %s), Input: %s (%s); per task: avg.: %s std.dev.: %s, Output: %s (%s)\n",
                             stageStats.getTotalCpuTime().convertToMostSuccinctTimeUnit(),
                             stageStats.getTotalScheduledTime().convertToMostSuccinctTimeUnit(),
+                            stageStats.getTotalBlockedTime().convertToMostSuccinctTimeUnit(),
+                            stageStats.getInputBlockedTime().convertToMostSuccinctTimeUnit(),
+                            stageStats.getOutputBlockedTime().convertToMostSuccinctTimeUnit(),
                             formatPositions(stageStats.getProcessedInputPositions()),
                             stageStats.getProcessedInputDataSize(),
                             formatDouble(avgPositionsPerTask),
@@ -578,7 +590,7 @@ public class PlanPrinter
         {
             String type = "";
             if (node.getStep() != AggregationNode.Step.SINGLE) {
-                type = format("(%s)", node.getStep().toString());
+                type = format("(%s)", node.getStep());
             }
             if (node.isStreamable()) {
                 type = format("%s(STREAMING)", type);
@@ -770,8 +782,25 @@ public class PlanPrinter
                     continue;
                 }
                 ValuePointer pointer = expressionAndPointers.getValuePointers().get(i);
-                String sourceSymbolName = expressionAndPointers.getClassifierSymbols().contains(symbol) ? "classifier" : pointer.getInputSymbol().getName();
-                nodeOutput.appendDetailsLine(indentString(1) + symbol + " := " + sourceSymbolName + "[" + formatLogicalIndexPointer(pointer.getLogicalIndexPointer()) + "]");
+
+                if (pointer instanceof ScalarValuePointer) {
+                    ScalarValuePointer scalarPointer = (ScalarValuePointer) pointer;
+                    String sourceSymbolName = expressionAndPointers.getClassifierSymbols().contains(symbol) ? "classifier" : scalarPointer.getInputSymbol().getName();
+                    nodeOutput.appendDetailsLine(indentString(1) + symbol + " := " + sourceSymbolName + "[" + formatLogicalIndexPointer(scalarPointer.getLogicalIndexPointer()) + "]");
+                }
+                else if (pointer instanceof AggregationValuePointer) {
+                    AggregationValuePointer aggregationPointer = (AggregationValuePointer) pointer;
+                    String processingMode = aggregationPointer.getSetDescriptor().isRunning() ? "RUNNING " : "FINAL ";
+                    String name = aggregationPointer.getFunction().getSignature().getName();
+                    String arguments = Joiner.on(", ").join(aggregationPointer.getArguments());
+                    String labels = aggregationPointer.getSetDescriptor().getLabels().stream()
+                            .map(IrLabel::getName)
+                            .collect(joining(", ", "{", "}"));
+                    nodeOutput.appendDetailsLine(indentString(1) + symbol + " := " + processingMode + name + "(" + arguments + ")" + labels);
+                }
+                else {
+                    throw new UnsupportedOperationException("unexpected ValuePointer type: " + pointer.getClass().getSimpleName());
+                }
             }
         }
 
@@ -1120,11 +1149,18 @@ public class PlanPrinter
                     .map(UnnestNode.Mapping::getInput)
                     .collect(toImmutableList());
 
+            Optional<String> replicate = node.getReplicateSymbols().isEmpty()
+                    ? Optional.empty()
+                    : Optional.of("replicate=" + formatOutputs(types, node.getReplicateSymbols()));
+            Optional<String> unnest = Optional.of("unnest=" + formatOutputs(types, unnestInputs));
+            Optional<String> filter = node.getFilter().map(filterExpression -> "filter=" + filterExpression);
             addNode(
                     node,
                     name,
-                    format("[replicate=%s, unnest=%s", formatOutputs(types, node.getReplicateSymbols()), formatOutputs(types, unnestInputs))
-                            + (node.getFilter().isPresent() ? format(", filter=%s]", node.getFilter().get().toString()) : "]"));
+                    Stream.of(replicate, unnest, filter)
+                            .filter(Optional::isPresent)
+                            .map(Optional::get)
+                            .collect(joining(", ", "[", "]")));
             return processChildren(node, context);
         }
 
@@ -1364,6 +1400,14 @@ public class PlanPrinter
                 Symbol symbol = node.getColumns().get(i);
                 nodeOutput.appendDetailsLine("%s := %s", name, symbol);
             }
+
+            return processChildren(node, context);
+        }
+
+        @Override
+        public Void visitSimpleTableExecuteNode(SimpleTableExecuteNode node, Void context)
+        {
+            addNode(node, "SimpleTableExecute", format("[%s]", node.getExecuteHandle()));
 
             return processChildren(node, context);
         }

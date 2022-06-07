@@ -13,43 +13,25 @@
  */
 package io.trino.metadata;
 
-import io.trino.spi.type.StandardTypes;
+import com.google.common.collect.ImmutableList;
+import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeSignature;
-import io.trino.spi.type.TypeSignatureParameter;
 
-import java.util.Arrays;
-import java.util.Optional;
+import java.util.ArrayList;
+import java.util.List;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
-import static com.google.common.collect.ImmutableList.toImmutableList;
 import static java.util.Objects.requireNonNull;
 
 public class AggregationFunctionMetadata
 {
     private final boolean orderSensitive;
-    private final Optional<TypeSignature> intermediateType;
+    private final List<TypeSignature> intermediateTypes;
 
-    public AggregationFunctionMetadata(boolean orderSensitive, TypeSignature... intermediateTypes)
+    private AggregationFunctionMetadata(boolean orderSensitive, List<TypeSignature> intermediateTypes)
     {
         this.orderSensitive = orderSensitive;
-
-        if (intermediateTypes.length == 0) {
-            intermediateType = Optional.empty();
-        }
-        else if (intermediateTypes.length == 1) {
-            intermediateType = Optional.of(intermediateTypes[0]);
-        }
-        else {
-            intermediateType = Optional.of(new TypeSignature(StandardTypes.ROW, Arrays.stream(intermediateTypes)
-                    .map(TypeSignatureParameter::anonymousField)
-                    .collect(toImmutableList())));
-        }
-    }
-
-    public AggregationFunctionMetadata(boolean orderSensitive, Optional<TypeSignature> intermediateType)
-    {
-        this.orderSensitive = orderSensitive;
-        this.intermediateType = requireNonNull(intermediateType, "intermediateType is null");
+        this.intermediateTypes = ImmutableList.copyOf(requireNonNull(intermediateTypes, "intermediateTypes is null"));
     }
 
     public boolean isOrderSensitive()
@@ -59,12 +41,12 @@ public class AggregationFunctionMetadata
 
     public boolean isDecomposable()
     {
-        return intermediateType.isPresent();
+        return !intermediateTypes.isEmpty();
     }
 
-    public Optional<TypeSignature> getIntermediateType()
+    public List<TypeSignature> getIntermediateTypes()
     {
-        return intermediateType;
+        return intermediateTypes;
     }
 
     @Override
@@ -72,7 +54,43 @@ public class AggregationFunctionMetadata
     {
         return toStringHelper(this)
                 .add("orderSensitive", orderSensitive)
-                .add("intermediateType", intermediateType)
+                .add("intermediateTypes", intermediateTypes)
                 .toString();
+    }
+
+    public static AggregationFunctionMetadataBuilder builder()
+    {
+        return new AggregationFunctionMetadataBuilder();
+    }
+
+    public static class AggregationFunctionMetadataBuilder
+    {
+        private boolean orderSensitive;
+        private final List<TypeSignature> intermediateTypes = new ArrayList<>();
+
+        private AggregationFunctionMetadataBuilder() {}
+
+        public AggregationFunctionMetadataBuilder orderSensitive()
+        {
+            this.orderSensitive = true;
+            return this;
+        }
+
+        public AggregationFunctionMetadataBuilder intermediateType(Type type)
+        {
+            this.intermediateTypes.add(requireNonNull(type, "type is null").getTypeSignature());
+            return this;
+        }
+
+        public AggregationFunctionMetadataBuilder intermediateType(TypeSignature type)
+        {
+            this.intermediateTypes.add(requireNonNull(type, "type is null"));
+            return this;
+        }
+
+        public AggregationFunctionMetadata build()
+        {
+            return new AggregationFunctionMetadata(orderSensitive, intermediateTypes);
+        }
     }
 }

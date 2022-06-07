@@ -17,9 +17,11 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
+import com.google.common.collect.Sets;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import io.airlift.log.Logger;
+import io.airlift.slice.Slice;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.trino.Session;
@@ -47,14 +49,16 @@ import io.trino.execution.StageInfo;
 import io.trino.execution.TaskInfo;
 import io.trino.execution.buffer.PagesSerde;
 import io.trino.execution.buffer.PagesSerdeFactory;
-import io.trino.execution.buffer.SerializedPage;
-import io.trino.operator.ExchangeClient;
+import io.trino.memory.context.SimpleLocalMemoryContext;
+import io.trino.operator.DirectExchangeClient;
+import io.trino.operator.DirectExchangeClientSupplier;
 import io.trino.spi.ErrorCode;
 import io.trino.spi.Page;
 import io.trino.spi.QueryId;
 import io.trino.spi.TrinoWarning;
 import io.trino.spi.WarningCode;
 import io.trino.spi.block.BlockEncodingSerde;
+import io.trino.spi.exchange.ExchangeId;
 import io.trino.spi.security.SelectedRole;
 import io.trino.spi.type.BooleanType;
 import io.trino.spi.type.Type;
@@ -97,8 +101,10 @@ import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.airlift.concurrent.MoreFutures.addTimeout;
+import static io.trino.SystemSessionProperties.getRetryPolicy;
 import static io.trino.SystemSessionProperties.isExchangeCompressionEnabled;
 import static io.trino.execution.QueryState.FAILED;
+import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static io.trino.server.protocol.QueryInfoUrlFactory.getQueryInfoUri;
 import static io.trino.server.protocol.QueryResultRows.queryResultRowsBuilder;
 import static io.trino.server.protocol.Slug.Context.EXECUTING_QUERY;
@@ -126,7 +132,7 @@ class Query
     private final Optional<URI> queryInfoUrl;
 
     @GuardedBy("this")
-    private final ExchangeClient exchangeClient;
+    private final DirectExchangeClient exchangeClient;
 
     private final Executor resultsProcessorExecutor;
     private final ScheduledExecutorService timeoutExecutor;
@@ -190,11 +196,18 @@ class Query
             Slug slug,
             QueryManager queryManager,
             Optional<URI> queryInfoUrl,
-            ExchangeClient exchangeClient,
+            DirectExchangeClientSupplier directExchangeClientSupplier,
             Executor dataProcessorExecutor,
             ScheduledExecutorService timeoutExecutor,
             BlockEncodingSerde blockEncodingSerde)
     {
+        DirectExchangeClient exchangeClient = directExchangeClientSupplier.get(
+                session.getQueryId(),
+                new ExchangeId("direct-exchange-query-results"),
+                new SimpleLocalMemoryContext(newSimpleAggregatedMemoryContext(), Query.class.getSimpleName()),
+                queryManager::outputTaskFailed,
+                getRetryPolicy(session));
+
         Query result = new Query(session, slug, queryManager, queryInfoUrl, exchangeClient, dataProcessorExecutor, timeoutExecutor, blockEncodingSerde);
 
         result.queryManager.addOutputInfoListener(result.getQueryId(), result::setQueryOutputInfo);
@@ -214,7 +227,7 @@ class Query
             Slug slug,
             QueryManager queryManager,
             Optional<URI> queryInfoUrl,
-            ExchangeClient exchangeClient,
+            DirectExchangeClient exchangeClient,
             Executor resultsProcessorExecutor,
             ScheduledExecutorService timeoutExecutor,
             BlockEncodingSerde blockEncodingSerde)
@@ -354,7 +367,7 @@ class Query
     private synchronized ListenableFuture<Void> getFutureStateChange()
     {
         // if the exchange client is open, wait for data
-        if (!exchangeClient.isClosed()) {
+        if (!exchangeClient.isFinished()) {
             return exchangeClient.isBlocked();
         }
 
@@ -417,6 +430,8 @@ class Query
         QueryInfo queryInfo = queryManager.getFullQueryInfo(queryId);
         queryManager.recordHeartbeat(queryId);
 
+        closeExchangeClientIfNecessary(queryInfo);
+
         // fetch result data from exchange
         QueryResultRows resultRows = removePagesFromExchange(queryInfo, targetResultSize.toBytes());
 
@@ -426,18 +441,20 @@ class Query
             updateCount = updatedRowsCount.orElse(null);
         }
 
-        closeExchangeClientIfNecessary(queryInfo);
-
         // advance next token
         // only return a next if
         // (1) the query is not done AND the query state is not FAILED
         //   OR
-        // (2)there is more data to send (due to buffering)
-        if ((!queryInfo.isFinalQueryInfo() && queryInfo.getState() != FAILED) || !exchangeClient.isClosed()) {
+        // (2) there is more data to send (due to buffering)
+        //   OR
+        // (3) cached query result needs client acknowledgement to discard
+        if (queryInfo.getState() != FAILED && (!queryInfo.isFinalQueryInfo() || !exchangeClient.isFinished() || (queryInfo.getOutputStage().isPresent() && !resultRows.isEmpty()))) {
             nextToken = OptionalLong.of(token + 1);
         }
         else {
             nextToken = OptionalLong.empty();
+            // the client is not coming back, make sure the exchangeClient is closed
+            exchangeClient.close();
         }
 
         URI nextResultsUri = null;
@@ -514,7 +531,7 @@ class Query
         try (PagesSerde.PagesSerdeContext context = serde.newContext()) {
             long bytes = 0;
             while (bytes < targetResultBytes) {
-                SerializedPage serializedPage = exchangeClient.pollPage();
+                Slice serializedPage = exchangeClient.pollPage();
                 if (serializedPage == null) {
                     break;
                 }
@@ -522,6 +539,9 @@ class Query
                 Page page = serde.deserialize(context, serializedPage);
                 bytes += page.getLogicalSizeInBytes();
                 resultBuilder.addPage(page);
+            }
+            if (exchangeClient.isFinished()) {
+                exchangeClient.close();
             }
         }
         catch (Throwable cause) {
@@ -573,9 +593,7 @@ class Query
             types = outputInfo.getColumnTypes();
         }
 
-        for (URI outputLocation : outputInfo.getBufferLocations()) {
-            exchangeClient.addLocation(outputLocation);
-        }
+        outputInfo.getBufferLocations().forEach(exchangeClient::addLocation);
         if (outputInfo.isNoMoreBufferLocations()) {
             exchangeClient.noMoreLocations();
         }
@@ -716,11 +734,14 @@ class Query
         QueryStats queryStats = queryInfo.getQueryStats();
         StageInfo outputStage = queryInfo.getOutputStage().orElse(null);
 
+        Set<String> globalUniqueNodes = new HashSet<>();
+        StageStats rootStageStats = toStageStats(outputStage, globalUniqueNodes);
+
         return StatementStats.builder()
                 .setState(queryInfo.getState().toString())
                 .setQueued(queryInfo.getState() == QueryState.QUEUED)
                 .setScheduled(queryInfo.isScheduled())
-                .setNodes(globalUniqueNodes(outputStage).size())
+                .setNodes(globalUniqueNodes.size())
                 .setTotalSplits(queryStats.getTotalDrivers())
                 .setQueuedSplits(queryStats.getQueuedDrivers())
                 .setRunningSplits(queryStats.getRunningDrivers() + queryStats.getBlockedDrivers())
@@ -734,11 +755,11 @@ class Query
                 .setPhysicalInputBytes(queryStats.getPhysicalInputDataSize().toBytes())
                 .setPeakMemoryBytes(queryStats.getPeakUserMemoryReservation().toBytes())
                 .setSpilledBytes(queryStats.getSpilledDataSize().toBytes())
-                .setRootStage(toStageStats(outputStage))
+                .setRootStage(rootStageStats)
                 .build();
     }
 
-    private static StageStats toStageStats(StageInfo stageInfo)
+    private static StageStats toStageStats(StageInfo stageInfo, Set<String> globalUniqueNodes)
     {
         if (stageInfo == null) {
             return null;
@@ -746,23 +767,11 @@ class Query
 
         io.trino.execution.StageStats stageStats = stageInfo.getStageStats();
 
-        ImmutableList.Builder<StageStats> subStages = ImmutableList.builder();
-        for (StageInfo subStage : stageInfo.getSubStages()) {
-            subStages.add(toStageStats(subStage));
-        }
-
-        Set<String> uniqueNodes = new HashSet<>();
-        for (TaskInfo task : stageInfo.getTasks()) {
-            // todo add nodeId to TaskInfo
-            URI uri = task.getTaskStatus().getSelf();
-            uniqueNodes.add(uri.getHost() + ":" + uri.getPort());
-        }
-
-        return StageStats.builder()
+        // Store current stage details into a builder
+        StageStats.Builder builder = StageStats.builder()
                 .setStageId(String.valueOf(stageInfo.getStageId().getId()))
                 .setState(stageInfo.getState().toString())
                 .setDone(stageInfo.getState().isDone())
-                .setNodes(uniqueNodes.size())
                 .setTotalSplits(stageStats.getTotalDrivers())
                 .setQueuedSplits(stageStats.getQueuedDrivers())
                 .setRunningSplits(stageStats.getRunningDrivers() + stageStats.getBlockedDrivers())
@@ -772,26 +781,36 @@ class Query
                 .setProcessedRows(stageStats.getRawInputPositions())
                 .setProcessedBytes(stageStats.getRawInputDataSize().toBytes())
                 .setPhysicalInputBytes(stageStats.getPhysicalInputDataSize().toBytes())
-                .setSubStages(subStages.build())
-                .build();
+                .setFailedTasks(stageStats.getFailedTasks())
+                .setCoordinatorOnly(stageInfo.isCoordinatorOnly())
+                .setNodes(countStageAndAddGlobalUniqueNodes(stageInfo, globalUniqueNodes));
+
+        // Recurse into child stages to create their StageStats
+        List<StageInfo> subStages = stageInfo.getSubStages();
+        if (subStages.isEmpty()) {
+            builder.setSubStages(ImmutableList.of());
+        }
+        else {
+            ImmutableList.Builder<StageStats> subStagesBuilder = ImmutableList.builderWithExpectedSize(subStages.size());
+            for (StageInfo subStage : subStages) {
+                subStagesBuilder.add(toStageStats(subStage, globalUniqueNodes));
+            }
+            builder.setSubStages(subStagesBuilder.build());
+        }
+
+        return builder.build();
     }
 
-    private static Set<String> globalUniqueNodes(StageInfo stageInfo)
+    private static int countStageAndAddGlobalUniqueNodes(StageInfo stageInfo, Set<String> globalUniqueNodes)
     {
-        if (stageInfo == null) {
-            return ImmutableSet.of();
+        List<TaskInfo> tasks = stageInfo.getTasks();
+        Set<String> stageUniqueNodes = Sets.newHashSetWithExpectedSize(tasks.size());
+        for (TaskInfo task : tasks) {
+            String nodeId = task.getTaskStatus().getNodeId();
+            stageUniqueNodes.add(nodeId);
+            globalUniqueNodes.add(nodeId);
         }
-        ImmutableSet.Builder<String> nodes = ImmutableSet.builder();
-        for (TaskInfo task : stageInfo.getTasks()) {
-            // todo add nodeId to TaskInfo
-            URI uri = task.getTaskStatus().getSelf();
-            nodes.add(uri.getHost() + ":" + uri.getPort());
-        }
-
-        for (StageInfo subStage : stageInfo.getSubStages()) {
-            nodes.addAll(globalUniqueNodes(subStage));
-        }
-        return nodes.build();
+        return stageUniqueNodes.size();
     }
 
     private static Optional<Integer> findCancelableLeafStage(QueryInfo queryInfo)

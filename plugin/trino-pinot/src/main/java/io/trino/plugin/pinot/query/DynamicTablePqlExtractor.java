@@ -20,7 +20,6 @@ import io.trino.spi.predicate.TupleDomain;
 import java.util.List;
 import java.util.Optional;
 
-import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.plugin.pinot.query.PinotQueryBuilder.getFilterClause;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
@@ -36,27 +35,26 @@ public final class DynamicTablePqlExtractor
     {
         StringBuilder builder = new StringBuilder();
         builder.append("select ");
-        if (!table.getSelections().isEmpty()) {
-            builder.append(table.getSelections().stream()
-                    .map(DynamicTablePqlExtractor::quoteIdentifier)
+        if (!table.getProjections().isEmpty()) {
+            builder.append(table.getProjections().stream()
+                    .map(DynamicTablePqlExtractor::formatExpression)
                     .collect(joining(", ")));
         }
-        if (!table.getGroupingColumns().isEmpty()) {
-            builder.append(table.getGroupingColumns().stream()
-                    .map(DynamicTablePqlExtractor::quoteIdentifier)
-                    .collect(joining(", ")));
-            if (!table.getAggregateColumns().isEmpty()) {
+
+        if (!table.getAggregateColumns().isEmpty()) {
+            // If there are only pushed down aggregate expressions
+            if (!table.getProjections().isEmpty()) {
                 builder.append(", ");
             }
+            builder.append(table.getAggregateColumns().stream()
+                    .map(DynamicTablePqlExtractor::formatExpression)
+                    .collect(joining(", ")));
         }
-        builder.append(table.getAggregateColumns().stream()
-                .map(PinotColumnHandle::getColumnName)
-                .collect(joining(", ")));
         builder.append(" from ");
         builder.append(table.getTableName());
         builder.append(table.getSuffix().orElse(""));
 
-        Optional<String> filter = getFilter(table.getFilter(), tupleDomain, columnHandles);
+        Optional<String> filter = getFilter(table.getFilter(), tupleDomain);
         if (filter.isPresent()) {
             builder.append(" where ")
                     .append(filter.get());
@@ -64,7 +62,7 @@ public final class DynamicTablePqlExtractor
         if (!table.getGroupingColumns().isEmpty()) {
             builder.append(" group by ");
             builder.append(table.getGroupingColumns().stream()
-                    .map(DynamicTablePqlExtractor::quoteIdentifier)
+                    .map(PinotColumnHandle::getExpression)
                     .collect(joining(", ")));
         }
         if (!table.getOrderBy().isEmpty()) {
@@ -74,19 +72,19 @@ public final class DynamicTablePqlExtractor
                             .collect(joining(", ")));
         }
         if (table.getLimit().isPresent()) {
-            builder.append(" limit ")
-                    .append(table.getLimit().getAsLong());
-            if (!table.getSelections().isEmpty() && table.getOffset().isPresent()) {
-                builder.append(", ")
-                        .append(table.getOffset().getAsLong());
+            builder.append(" limit ");
+            if (table.getOffset().isPresent()) {
+                builder.append(table.getOffset().getAsLong())
+                        .append(", ");
             }
+            builder.append(table.getLimit().getAsLong());
         }
         return builder.toString();
     }
 
-    private static Optional<String> getFilter(Optional<String> filter, TupleDomain<ColumnHandle> tupleDomain, List<PinotColumnHandle> columnHandles)
+    private static Optional<String> getFilter(Optional<String> filter, TupleDomain<ColumnHandle> tupleDomain)
     {
-        Optional<String> tupleFilter = getFilterClause(tupleDomain, Optional.empty(), columnHandles);
+        Optional<String> tupleFilter = getFilterClause(tupleDomain, Optional.empty());
 
         if (tupleFilter.isPresent() && filter.isPresent()) {
             return Optional.of(format("%s AND %s", encloseInParentheses(tupleFilter.get()), encloseInParentheses(filter.get())));
@@ -106,7 +104,7 @@ public final class DynamicTablePqlExtractor
     {
         requireNonNull(orderByExpression, "orderByExpression is null");
         StringBuilder builder = new StringBuilder()
-                .append(quoteIdentifier(orderByExpression.getColumn()));
+                .append(orderByExpression.getExpression());
         if (!orderByExpression.isAsc()) {
             builder.append(" desc");
         }
@@ -118,9 +116,16 @@ public final class DynamicTablePqlExtractor
         return format("(%s)", value);
     }
 
-    private static String quoteIdentifier(String identifier)
+    private static String formatExpression(PinotColumnHandle pinotColumnHandle)
     {
-        checkArgument(!identifier.contains("\""), "Identifier contains double quotes: '%s'", identifier);
-        return format("\"%s\"", identifier);
+        if (pinotColumnHandle.isAliased()) {
+            return pinotColumnHandle.getExpression() + " AS " + quoteIdentifier(pinotColumnHandle.getColumnName());
+        }
+        return pinotColumnHandle.getExpression();
+    }
+
+    public static String quoteIdentifier(String identifier)
+    {
+        return format("\"%s\"", identifier.replaceAll("\"", "\"\""));
     }
 }
